@@ -1,0 +1,35 @@
+[build]
+# Number of parallel jobs, defaults to # of CPUs
+jobs = 4
+
+# Compiler settings
+rustflags = [
+    "-D", "warnings",
+    "-D", "unsafe_code",
+    "-W", "missing_docs",
+    "-W", "rustdoc::missing_crate_level_docs",
+]
+
+[env]
+# Enable all security checks
+RUSTFLAGS = "-D warnings"
+CARGO_CFG_UNIX = "1"
+
+[profile.dev]
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = "unwind"
+incremental = true
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

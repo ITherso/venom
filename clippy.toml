@@ -1,0 +1,53 @@
+# VENOM Clippy Configuration
+# Static analysis and linting rules
+
+# Cognitive complexity (functions shouldn't be too complex)
+cognitive-complexity-threshold = 20
+
+# Docstring length (minimum characters before warning)
+doc-valid-idents = [
+    "VENOM",
+    "CLI",
+    "MITM",
+    "TLS",
+    "HTTP",
+    "HTTPS",
+    "API",
+    "JSON",
+    "XML",
+    "CSV",
+    "AES",
+    "RBAC",
+    "SSO",
+    "OAuth2",
+    "OIDC",
+    "SAML",
+    "LDAP",
+    "GDPR",
+    "HIPAA",
+    "SOC2",
+    "C2",
+    "CVSS",
+    "CVE",
+    "SIEM",
+    "ELK",
+    "GitHub",
+    "Kubernetes",
+    "PostgreSQL",
+    "Redis",
+    "Elasticsearch",
+]
+
+# Type complexity (avoid overly complex types)
+type-complexity-threshold = 250
+
+# Configuration for specific lints
+trivial-numeric-casts-threshold = 256
+single-char-binding-names-threshold = 4
+
+# Documentation requirements
+missing-docs-in-crate-items = false
+
+# Safety
+# We want to be strict about unsafe code usage
+unsafe-derive-derive-usage = true
