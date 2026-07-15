@@ -11,6 +11,7 @@ pub mod loadtest;
 pub mod monitoring;
 pub mod cache;
 pub mod collaboration;
+pub mod c2;
 pub mod error;
 
 pub use error::{Error, Result};
