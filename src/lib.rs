@@ -15,6 +15,7 @@ pub mod c2;
 pub mod zeroday_db;
 pub mod advanced;
 pub mod enterprise;
+pub mod cli;
 pub mod error;
 
 pub use error::{Error, Result};
