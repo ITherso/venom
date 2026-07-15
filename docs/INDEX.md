@@ -28,7 +28,7 @@ Welcome to the complete VENOM documentation. Start here to find what you need.
 ### Development
 - **[Contributing Guide](CONTRIBUTING.md)** - Code style, PR process, development setup
 - **[Module Development](EXTENDING.md)** - How to create custom detectors, payloads, frameworks
-- **[Testing Guide](TESTING.md)** - Writing and running tests
+- **[Testing Framework](TESTING.md)** - Unit, integration, E2E, performance, security, compatibility tests
 - **[Performance Tips](ARCHITECTURE.md#performance-characteristics)** - Optimization techniques
 
 ### Building & Deployment
