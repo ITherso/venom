@@ -9,6 +9,7 @@ use super::history::ProxyHistory;
 use super::ca::CertificateAuthority;
 use super::tls_server::TlsServer;
 use super::http_parser::{HttpParser, HttpRequest, HttpResponse};
+use super::interceptor::RequestInterceptor;
 use crate::scanner::VulnerabilityDetector;
 use sqlx::SqlitePool;
 
@@ -171,8 +172,11 @@ async fn handle_connect_tunnel(
 
     println!("[✓] HTTPS tunnel ready (TLS decryption active)");
 
+    // Create interceptor (can add rules via CLI/API in future)
+    let interceptor = Arc::new(RequestInterceptor::new());
+
     // Relay decrypted traffic
-    relay_https_traffic(client_tls, target_tls, history).await?;
+    relay_https_traffic(client_tls, target_tls, history, interceptor).await?;
 
     Ok(())
 }
@@ -181,12 +185,13 @@ async fn relay_https_traffic<C, S>(
     client_tls: C,
     server_tls: S,
     history: Arc<ProxyHistory>,
+    interceptor: Arc<RequestInterceptor>,
 ) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin,
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    println!("[*] Relaying decrypted HTTPS traffic with logging...");
+    println!("[*] Relaying decrypted HTTPS traffic with interception...");
 
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
     let (mut server_read, mut server_write) = tokio::io::split(server_tls);
@@ -199,7 +204,8 @@ where
                 Ok(0) => break,
                 Ok(n) => {
                     // Try to parse HTTP request
-                    if let Ok((req, _)) = HttpParser::parse_request(&buf[..n]) {
+                    let mut forward = true;
+                    if let Ok((mut req, _)) = HttpParser::parse_request(&buf[..n]) {
                         println!("[+] Request: {} {}", req.method, req.path);
 
                         // Scan for vulnerabilities
@@ -211,12 +217,28 @@ where
                             }
                         }
 
+                        // Apply interception rules
+                        if interceptor.should_intercept_request(&req) {
+                            println!("[*] Interception rule matched");
+                            if let Err(_) = interceptor.apply_request_modifications(&mut req) {
+                                println!("[!] Request dropped by interception rule");
+                                forward = false;
+                            } else {
+                                // Re-serialize modified request
+                                let modified_bytes = HttpParser::serialize_request(&req);
+                                let _ = server_write.write_all(&modified_bytes).await;
+                                forward = false;
+                            }
+                        }
+
                         // Log request to database
                         let _ = history.log_request(&req).await;
                     }
 
-                    // Forward to server
-                    let _ = server_write.write_all(&buf[..n]).await;
+                    // Forward original request if not intercepted
+                    if forward {
+                        let _ = server_write.write_all(&buf[..n]).await;
+                    }
                 }
                 Err(_) => break,
             }
@@ -231,15 +253,32 @@ where
                 Ok(0) => break,
                 Ok(n) => {
                     // Try to parse HTTP response
-                    if let Ok((res, _)) = HttpParser::parse_response(&buf[..n]) {
+                    let mut forward = true;
+                    if let Ok((mut res, _)) = HttpParser::parse_response(&buf[..n]) {
                         println!("[+] Response: {} {}", res.status_code, res.reason);
+
+                        // Apply interception rules to response
+                        if interceptor.should_intercept_response(&res) {
+                            println!("[*] Response interception rule matched");
+                            if let Err(_) = interceptor.apply_response_modifications(&mut res) {
+                                println!("[!] Response dropped by interception rule");
+                                forward = false;
+                            } else {
+                                // Re-serialize modified response
+                                let modified_bytes = HttpParser::serialize_response(&res);
+                                let _ = client_write.write_all(&modified_bytes).await;
+                                forward = false;
+                            }
+                        }
 
                         // Log response to database
                         let _ = history.log_response(&res).await;
                     }
 
-                    // Forward to client
-                    let _ = client_write.write_all(&buf[..n]).await;
+                    // Forward original response if not intercepted
+                    if forward {
+                        let _ = client_write.write_all(&buf[..n]).await;
+                    }
                 }
                 Err(_) => break,
             }
