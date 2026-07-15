@@ -11,6 +11,7 @@ use super::tls_server::TlsServer;
 use super::http_parser::{HttpParser, HttpRequest, HttpResponse};
 use super::interceptor::RequestInterceptor;
 use crate::scanner::VulnerabilityDetector;
+use crate::postexploit::ZeroDayEngine;
 use sqlx::SqlitePool;
 
 pub struct MitmServer {
@@ -264,6 +265,36 @@ where
                     let mut forward = true;
                     if let Ok((mut res, _)) = HttpParser::parse_response(&buf[..n]) {
                         println!("[+] Response: {} {}", res.status_code, res.reason);
+
+                        // Zero day analysis on response (AI-powered unknown vulnerability detection)
+                        // Create minimal request stub for analysis
+                        let stub_req = HttpRequest {
+                            method: "GET".to_string(),
+                            path: "/".to_string(),
+                            version: "HTTP/1.1".to_string(),
+                            headers: Default::default(),
+                            body: vec![],
+                        };
+
+                        if let Ok(zeroday_findings) = ZeroDayEngine::analyze(&stub_req, &res) {
+                            if !zeroday_findings.is_empty() {
+                                let prob = ZeroDayEngine::calculate_zeroday_probability(&zeroday_findings);
+                                println!("[🔴] ZERO DAY ALERT: Potential unknown vulnerability detected!");
+                                println!("    Confidence: {:.0}%", prob * 100.0);
+                                for finding in &zeroday_findings {
+                                    println!("    • {} [{}]", finding.name, finding.pattern_type);
+                                    println!("      Method: {}", finding.method);
+                                    println!("      Evidence: {}", finding.evidence);
+                                    println!("      Recommendation: {}", finding.recommendation);
+
+                                    // Generate potential payloads
+                                    let payloads = ZeroDayEngine::generate_payloads(finding);
+                                    if !payloads.is_empty() {
+                                        println!("      Suggested payloads: {} available", payloads.len());
+                                    }
+                                }
+                            }
+                        }
 
                         // Apply interception rules to response
                         if interceptor.should_intercept_response(&res) {
