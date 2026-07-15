@@ -1,6 +1,9 @@
 use crate::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::SqlitePool;
+use super::http_parser;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpRequest {
@@ -95,5 +98,39 @@ impl ProxyHistory {
                 body,
             })
             .collect())
+    }
+
+    pub async fn log_request(&self, req: &http_parser::HttpRequest) -> Result<()> {
+        let headers_json = serde_json::to_string(&req.headers)
+            .unwrap_or_else(|_| "{}".to_string());
+
+        let _ = sqlx::query(
+            "INSERT INTO requests (method, url, headers, body) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&req.method)
+        .bind(&req.path)
+        .bind(headers_json)
+        .bind(&req.body)
+        .execute(&self.pool)
+        .await;
+
+        Ok(())
+    }
+
+    pub async fn log_response(&self, resp: &http_parser::HttpResponse) -> Result<()> {
+        let headers_json = serde_json::to_string(&resp.headers)
+            .unwrap_or_else(|_| "{}".to_string());
+
+        let _ = sqlx::query(
+            "INSERT INTO responses (status_code, headers, body, size) VALUES (?, ?, ?, ?)"
+        )
+        .bind(resp.status_code as i32)
+        .bind(headers_json)
+        .bind(&resp.body)
+        .bind(resp.body.len() as i32)
+        .execute(&self.pool)
+        .await;
+
+        Ok(())
     }
 }

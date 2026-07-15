@@ -8,6 +8,8 @@ use super::tls::TlsConfig;
 use super::history::ProxyHistory;
 use super::ca::CertificateAuthority;
 use super::tls_server::TlsServer;
+use super::http_parser::{HttpParser, HttpRequest, HttpResponse};
+use crate::scanner::VulnerabilityDetector;
 use sqlx::SqlitePool;
 
 pub struct MitmServer {
@@ -178,23 +180,42 @@ async fn handle_connect_tunnel(
 async fn relay_https_traffic<C, S>(
     client_tls: C,
     server_tls: S,
-    _history: Arc<ProxyHistory>,
+    history: Arc<ProxyHistory>,
 ) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin,
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    println!("[*] Relaying decrypted HTTPS traffic...");
+    println!("[*] Relaying decrypted HTTPS traffic with logging...");
 
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
     let (mut server_read, mut server_write) = tokio::io::split(server_tls);
 
+    // Request forwarding: client → server
     let c2s = async {
-        let mut buf = vec![0u8; 8192];
+        let mut buf = vec![0u8; 16384];
         loop {
             match client_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Try to parse HTTP request
+                    if let Ok((req, _)) = HttpParser::parse_request(&buf[..n]) {
+                        println!("[+] Request: {} {}", req.method, req.path);
+
+                        // Scan for vulnerabilities
+                        let vulns = VulnerabilityDetector::scan_request(&req);
+                        if !vulns.is_empty() {
+                            println!("[!] Vulnerabilities found: {}", vulns.len());
+                            for v in &vulns {
+                                println!("    - {}: {}", v.vuln_type, v.evidence);
+                            }
+                        }
+
+                        // Log request to database
+                        let _ = history.log_request(&req).await;
+                    }
+
+                    // Forward to server
                     let _ = server_write.write_all(&buf[..n]).await;
                 }
                 Err(_) => break,
@@ -202,12 +223,22 @@ where
         }
     };
 
+    // Response forwarding: server → client
     let s2c = async {
-        let mut buf = vec![0u8; 8192];
+        let mut buf = vec![0u8; 16384];
         loop {
             match server_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Try to parse HTTP response
+                    if let Ok((res, _)) = HttpParser::parse_response(&buf[..n]) {
+                        println!("[+] Response: {} {}", res.status_code, res.reason);
+
+                        // Log response to database
+                        let _ = history.log_response(&res).await;
+                    }
+
+                    // Forward to client
                     let _ = client_write.write_all(&buf[..n]).await;
                 }
                 Err(_) => break,
