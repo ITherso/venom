@@ -137,11 +137,16 @@ venom/
 Browser → VENOM:8080 (TLS MITM) → Target Server
   ↓
 1. Accept TLS from browser (generated cert per domain)
-2. Decrypt HTTPS traffic
-3. Parse HTTP requests/responses
-4. Log to SQLite
-5. Automatic vulnerability scan
+2. Decrypt HTTPS traffic → plain HTTP
+3. Parse HTTP requests/responses in real-time
+4. Run vulnerability scanner (SQLi, XSS, SSTI, XXE, IDOR, SSRF)
+5. Apply interception rules (modify/drop)
 6. Re-encrypt to target server
+7. Log all traffic to SQLite database
+
+Complete pipeline:
+HTTPS Interception → HTTP Parsing → Vulnerability Scanning → 
+Request Modification → Database Logging → Target Forwarding
 ```
 
 ### Vulnerability Detection
@@ -394,14 +399,21 @@ Contributions welcome! Areas:
 
 ## 📝 Changelog
 
+### v0.3.2 - 2026-07-15
+- ✅ PHASE 2.3: Full HTTPS Interception Pipeline
+- ✅ HTTP request/response parsing from decrypted TLS streams
+- ✅ Real-time vulnerability scanning on every request
+- ✅ Request/response logging to SQLite database
+- ✅ Interception rule engine (modify/drop requests)
+- ✅ Request modification and re-serialization
+- ✅ Bidirectional relay with interception applied
+
 ### v0.3.1 - 2026-07-15
 - ✅ PHASE 2.2: HTTPS TLS Interception (ACTIVE)
 - ✅ Client-side TLS termination (MITM with generated certs)
 - ✅ Server-side TLS connection (system certs)
 - ✅ Bidirectional async relay of decrypted traffic
 - ✅ Rustls ring crypto provider initialization
-- ⏳ Traffic logging integration (next)
-- ⏳ HTTP request/response parsing from TLS streams (next)
 
 ### v0.3.0 - 2026-07-15
 - ✅ PHASE 3: Vulnerability scanner
