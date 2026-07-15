@@ -72,7 +72,9 @@ cargo build --release
 ### ✅ PHASE 2: TLS Interception
 | Feature | Status | Details |
 |---------|--------|---------|
-| **HTTPS Decryption** | ✅ | CONNECT tunnel + HTTPS parsing |
+| **HTTPS Decryption** | ✅ | CONNECT tunnel + TLS handshake + cert MITM |
+| **Client TLS Termination** | ✅ | Browser ↔ VENOM with generated certs |
+| **Server TLS Connection** | ✅ | VENOM ↔ Target with system certs |
 | **HTTP Parser** | ✅ | Request/response parsing |
 | **Request Interceptor** | ✅ | Rule-based interception engine |
 | **Interception Actions** | ✅ | Drop, modify, log, pass-through |
@@ -130,15 +132,16 @@ venom/
 
 ## 🎯 Capabilities
 
-### Real-Time Proxy Capture
+### Real-Time HTTPS Interception
 ```
-Browser → VENOM:8080 → Target
+Browser → VENOM:8080 (TLS MITM) → Target Server
   ↓
-Request logged to SQLite
-  ↓
-Automatic vulnerability scan
-  ↓
-Response logged
+1. Accept TLS from browser (generated cert per domain)
+2. Decrypt HTTPS traffic
+3. Parse HTTP requests/responses
+4. Log to SQLite
+5. Automatic vulnerability scan
+6. Re-encrypt to target server
 ```
 
 ### Vulnerability Detection
@@ -390,6 +393,15 @@ Contributions welcome! Areas:
 ---
 
 ## 📝 Changelog
+
+### v0.3.1 - 2026-07-15
+- ✅ PHASE 2.2: HTTPS TLS Interception (ACTIVE)
+- ✅ Client-side TLS termination (MITM with generated certs)
+- ✅ Server-side TLS connection (system certs)
+- ✅ Bidirectional async relay of decrypted traffic
+- ✅ Rustls ring crypto provider initialization
+- ⏳ Traffic logging integration (next)
+- ⏳ HTTP request/response parsing from TLS streams (next)
 
 ### v0.3.0 - 2026-07-15
 - ✅ PHASE 3: Vulnerability scanner
