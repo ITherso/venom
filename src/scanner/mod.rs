@@ -5,6 +5,8 @@ pub mod baseline;
 pub mod mutation;
 pub mod analyzer;
 pub mod sqli_expert;
+pub mod sqli_advanced;
+pub mod sqli_payloads;
 pub mod xss_expert;
 pub mod ssti_expert;
 pub mod parallel;
