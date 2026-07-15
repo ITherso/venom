@@ -243,31 +243,34 @@ sqlite> SELECT method, url, status_code FROM requests JOIN responses ON requests
 
 ## 🚀 Roadmap
 
-### v0.2.0 (PHASE 2) - July 2026
-- [x] Proxy foundation
-- [x] CA certificate generation
-- [ ] Full HTTPS decryption (rustls TLS termination)
-- [ ] Request modification API
-- [ ] WebSocket real-time updates
+### v0.2.0 (PHASE 2) - ✅ COMPLETE
+- [x] MITM Proxy foundation
+- [x] CA certificate generation & caching
+- [x] TLS Interception (CONNECT tunneling)
+- [x] HTTP request/response parsing
+- [x] Request interceptor with rules
+- [x] Interception actions (modify, drop, log)
 
-### v0.3.0 (PHASE 3) - August 2026
-- [ ] Active vulnerability scanner
-- [ ] WAF detection
-- [ ] Multi-threaded scanning
-- [ ] Payload expansion (100+ per type)
+### v0.3.0 (PHASE 3) - ✅ COMPLETE
+- [x] Vulnerability detector (pattern-based)
+- [x] SQLi, XSS, SSTI, XXE, IDOR, SSRF detection
+- [x] Real-time request scanning
+- [x] Evidence generation
+- [x] Severity levels
 
-### v0.4.0 (PHASE 4) - September 2026
-- [ ] Repeater (manual testing)
-- [ ] Intruder (fuzzing)
-- [ ] Decoder (encoding tools)
+### v0.4.0 (PHASE 4) - 🔮 Coming
+- [ ] Repeater (request replay & modification)
+- [ ] Intruder (fuzzing engine)
+- [ ] Decoder (Base64, Hex, URL, JWT)
+- [ ] Collaborator (OOB detection)
 - [ ] Report generation (HTML/JSON)
-- [ ] Web dashboard (React frontend)
 
-### v1.0.0 - Q4 2026
+### v1.0.0 - Q4 2026 🎯
 - Production-ready
 - Full feature parity with Burp Suite Community
-- Performance benchmarks
+- Performance benchmarks (<100ms overhead)
 - Comprehensive documentation
+- Web dashboard (optional)
 
 ---
 
