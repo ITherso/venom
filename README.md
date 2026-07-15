@@ -346,26 +346,36 @@ sqlite> SELECT method, url, status_code FROM requests
 
 ## 🚀 Roadmap
 
-### v0.3.0 ✅ (Current)
+### v0.5.0 ✅ (Current)
 - [x] MITM Proxy (TLS interception)
 - [x] HTTPS request/response capture
 - [x] SQLite history
 - [x] Request interceptor
 - [x] Vulnerability scanner (6 types)
+- [x] Auto-exploit discovery
+- [x] Post-exploitation framework
+- [x] Zero day detection engine
+- [x] C2 framework with agents
+- [x] Repeater (manual request testing)
+- [x] Intruder (fuzzing engine)
+- [x] Professional report generation (HTML/PDF)
+- [x] REST API with dashboard
+- [x] Real-time WebSocket updates
 
-### v0.4.0 🔮 (Coming)
-- [ ] Repeater (manual request testing)
-- [ ] Intruder (fuzzing engine)
+### v0.6.0 🔮 (Coming)
 - [ ] Decoder (Base64, Hex, URL, JWT)
 - [ ] Collaborator (OOB detection)
-- [ ] Report generation (HTML/JSON)
+- [ ] Advanced fuzzing templates
+- [ ] ML-powered scanning enhancements
+- [ ] Kubernetes deployment
 
 ### v1.0.0 📍 (Production)
-- Full feature parity with Burp Suite Community
-- Web dashboard (optional)
-- Advanced scanning
+- Full feature parity with Burp Suite Pro
+- Advanced scanning & ML detection
+- Web dashboard (production-ready)
 - Performance optimization
 - Comprehensive documentation
+- Enterprise features
 
 ---
 
@@ -408,17 +418,29 @@ PHASE 3 (Week 3) ✅
 ├─ 6 vulnerability types
 └─ Evidence generation
 
-PHASE 4 (Week 4) 🔮
+PHASE 4 (Week 4) ✅
 ├─ Repeater (request replay)
 ├─ Intruder (fuzzer)
-├─ Decoder (tools)
-└─ Reporting
+├─ Post-exploitation framework
+└─ C2 framework
 
-PHASE 5 (Week 5) 🔮
+PHASE 5 (Week 5) ✅
+├─ Zero day detection engine
+├─ Anomaly detection (4-vector scoring)
+├─ Behavioral analysis
+└─ Intelligent payload generation
+
+PHASE 6 (Week 6) ✅
+├─ Professional report generation
+├─ HTML/PDF export
+├─ Risk scoring algorithm
+└─ Detailed remediation guidance
+
+PHASE 7 (Week 7+) 🔮
 ├─ Web dashboard
 ├─ WebSocket real-time
-├─ Advanced features
-└─ v1.0 release
+├─ Advanced ML features
+└─ v1.0 production release
 ```
 
 ---
@@ -431,8 +453,12 @@ PHASE 5 (Week 5) 🔮
 | **Language** | Rust | Java |
 | **Proxy** | ✅ Full | ✅ Full |
 | **Scanner** | ✅ Active | ✅ Full |
-| **Repeater** | ⏳ v0.4 | ✅ Full |
-| **Intruder** | ⏳ v0.4 | ✅ Full |
+| **Repeater** | ✅ Full | ✅ Full |
+| **Intruder** | ✅ Full | ✅ Full |
+| **Zero Day Detection** | ✅ Yes | ❌ No |
+| **Report Generation** | ✅ HTML/PDF | Limited |
+| **Post-Exploitation** | ✅ Full | ❌ No |
+| **C2 Framework** | ✅ Yes | ❌ No |
 | **Performance** | ⚡ <50ms | ~200ms |
 | **Memory** | 15-25MB | 500MB+ |
 | **Customizable** | ✅ Rust | Limited |
