@@ -1,4 +1,4 @@
-use venom::{proxy::MitmProxy, scanner::Scanner, repeater::Repeater, database};
+use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database};
 use clap::{Parser, Subcommand};
 use std::path::Path;
 
@@ -41,25 +41,22 @@ async fn main() {
             println!("🔴 VENOM - MITM Proxy Starting");
             println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-            let db_path = dirs::home_dir()
-                .map(|p| p.join(".venom/history.db"))
-                .unwrap_or_else(|| ".venom/history.db".into());
-
-            if let Some(parent) = db_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+            let venom_dir = std::path::PathBuf::from(".venom");
+            let db_path = venom_dir.join("history.db");
+            let _ = std::fs::create_dir_all(&venom_dir);
 
             match database::init_pool(db_path.to_str().unwrap_or("history.db")).await {
                 Ok(pool) => {
-                    match MitmProxy::new(&host, port, pool).await {
-                        Ok(proxy) => {
-                            println!("[+] Database initialized at {:?}", db_path);
+                    match MitmServer::new(&host, port, &venom_dir, pool).await {
+                        Ok(server) => {
+                            println!("[+] Database: {:?}", db_path);
+                            println!("[+] CA Dir: {:?}", venom_dir);
                             println!("[+] Proxy listening on {}:{}", host, port);
-                            if let Err(e) = proxy.start().await {
-                                eprintln!("[!] Proxy error: {}", e);
+                            if let Err(e) = server.start().await {
+                                eprintln!("[!] Server error: {}", e);
                             }
                         }
-                        Err(e) => eprintln!("[!] Failed to create proxy: {}", e),
+                        Err(e) => eprintln!("[!] Failed to create server: {}", e),
                     }
                 }
                 Err(e) => eprintln!("[!] Database error: {}", e),
