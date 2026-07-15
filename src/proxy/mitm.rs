@@ -2,7 +2,7 @@ use crate::Result;
 use std::net::SocketAddr;
 use std::path::Path;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use super::tls::TlsConfig;
 use super::history::ProxyHistory;
@@ -106,6 +106,7 @@ async fn handle_connect_tunnel(
     tls_config: Arc<TlsConfig>,
     history: Arc<ProxyHistory>,
 ) -> Result<()> {
+    let mut client_owned = client;
     // Parse: CONNECT example.com:443 HTTP/1.1
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -117,14 +118,83 @@ async fn handle_connect_tunnel(
 
     println!("[+] CONNECT tunnel to: {}", domain);
 
-    // Send 200 OK to client
+    // Send 200 OK to client (establish tunnel)
     let response = b"HTTP/1.1 200 Connection Established\r\n\r\n";
     client
         .write_all(response)
         .await
         .map_err(|e| crate::Error::ProxyError(e.to_string()))?;
 
-    println!("[+] Sent 200 OK, tunnel ready for {}. TLS termination in PHASE 2.2", domain);
+    println!("[+] Sent 200 OK to client");
+
+    // Generate cert for domain (for future TLS termination)
+    if let Ok((_, _)) = tls_config.cert_cache.get_or_generate_cert(domain) {
+        println!("[+] Generated cert for {}", domain);
+    } else {
+        eprintln!("[!] Cert generation failed for {}", domain);
+    }
+
+    // Connect to target server
+    println!("[*] Connecting to target: {}", target_host);
+    let mut target = match TcpStream::connect(target_host).await {
+        Ok(s) => {
+            println!("[+] Connected to target");
+            s
+        }
+        Err(e) => {
+            eprintln!("[!] Target connection failed: {}", e);
+            let _ = client
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                .await;
+            return Err(crate::Error::ProxyError(format!("Target connect failed: {}", e)));
+        }
+    };
+
+    println!("[+] HTTPS tunnel established for {}", domain);
+    println!("[!] Note: Full TLS decryption requires rustls ServerConnection implementation");
+    println!("[✓] Traffic relay ready (transparent proxy mode)");
+
+    // Relay traffic bidirectionally (simplified)
+    // In production: intercept + decrypt + modify + re-encrypt
+
+    // For now: simple transparent relay (client ↔ target without decryption)
+    println!("[*] Relaying encrypted traffic...");
+
+    let (mut client_read, mut client_write) = client.split();
+    let (mut target_read, mut target_write) = target.into_split();
+
+    // Forward: client → target
+    let c2t = async {
+        loop {
+            let mut buf = [0u8; 4096];
+            match client_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = target_write.write_all(&buf[..n]).await;
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    // Forward: target → client
+    let t2c = async {
+        loop {
+            let mut buf = [0u8; 4096];
+            match target_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = client_write.write_all(&buf[..n]).await;
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = c2t => {},
+        _ = t2c => {},
+    }
 
     Ok(())
 }
