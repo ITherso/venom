@@ -7,6 +7,7 @@ pub mod decoder;
 pub mod database;
 pub mod api;
 pub mod reporting;
+pub mod loadtest;
 pub mod error;
 
 pub use error::{Error, Result};

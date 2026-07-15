@@ -1,4 +1,4 @@
-use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database, api::ApiServer};
+use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database, api::ApiServer, loadtest::{LoadTestRunner, profiles::{LoadProfile, LoadTestConfig}}};
 use clap::{Parser, Subcommand};
 use std::path::Path;
 
@@ -35,6 +35,16 @@ enum Commands {
         url: String,
         #[arg(long, default_value = "GET")]
         method: String,
+    },
+    LoadTest {
+        #[arg(value_name = "URL")]
+        target: String,
+        #[arg(long, default_value = "baseline")]
+        profile: String,
+        #[arg(long)]
+        generate_scripts: bool,
+        #[arg(long)]
+        output_dir: Option<String>,
     },
 }
 
@@ -122,6 +132,94 @@ async fn main() {
             match repeater.send(&url, &method, None).await {
                 Ok(resp) => println!("[+] Response:\n{}", resp),
                 Err(e) => eprintln!("[!] Error: {}", e),
+            }
+        }
+
+        Commands::LoadTest { target, profile, generate_scripts, output_dir } => {
+            println!("🔥 VENOM - Load Testing Suite");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("[*] Target: {}", target);
+            println!("[*] Profile: {}", profile);
+            println!();
+
+            // Parse profile
+            let load_profile = match profile.as_str() {
+                "baseline" => LoadProfile::Baseline,
+                "standard" => LoadProfile::Standard,
+                "high" => LoadProfile::High,
+                "stress" => LoadProfile::Stress,
+                "spike" => LoadProfile::Spike,
+                _ => {
+                    eprintln!("[!] Unknown profile: {}. Use: baseline, standard, high, stress, spike", profile);
+                    return;
+                }
+            };
+
+            let config = load_profile.config(&target);
+            println!("[+] Configuration:");
+            println!("    Concurrent Users: {}", config.concurrent_users);
+            println!("    Requests/sec: {}", config.requests_per_second);
+            println!("    Duration: {}s", config.duration_seconds);
+            println!();
+
+            if generate_scripts {
+                let out_dir = output_dir.unwrap_or_else(|| ".venom/loadtest".to_string());
+                let _ = std::fs::create_dir_all(&out_dir);
+
+                println!("[*] Generating load test scripts...");
+
+                // Generate Apache Bench script
+                let ab_path = format!("{}/bench-{}.sh", out_dir, profile);
+                match LoadTestRunner::generate_ab_script(&config, &ab_path).await {
+                    Ok(_) => println!("[+] Apache Bench script: {}", ab_path),
+                    Err(e) => eprintln!("[!] Error generating AB script: {}", e),
+                }
+
+                // Generate wrk Lua script
+                let wrk_path = format!("{}/bench-{}.lua", out_dir, profile);
+                match LoadTestRunner::generate_wrk_script_file(&config, &wrk_path).await {
+                    Ok(_) => println!("[+] wrk Lua script: {}", wrk_path),
+                    Err(e) => eprintln!("[!] Error generating wrk script: {}", e),
+                }
+
+                // Generate combined benchmark script
+                let combined_path = format!("{}/benchmark-{}.sh", out_dir, profile);
+                match LoadTestRunner::generate_benchmark_script(&config, &combined_path).await {
+                    Ok(_) => println!("[+] Combined benchmark script: {}", combined_path),
+                    Err(e) => eprintln!("[!] Error generating benchmark script: {}", e),
+                }
+
+                // Generate docker-compose for monitoring
+                let docker_path = format!("{}/docker-compose.yml", out_dir);
+                match LoadTestRunner::generate_docker_compose(&docker_path).await {
+                    Ok(_) => println!("[+] Docker Compose: {}", docker_path),
+                    Err(e) => eprintln!("[!] Error generating docker-compose: {}", e),
+                }
+
+                // Generate Prometheus config
+                let prom_path = format!("{}/prometheus.yml", out_dir);
+                match LoadTestRunner::generate_prometheus_config(&prom_path).await {
+                    Ok(_) => println!("[+] Prometheus config: {}", prom_path),
+                    Err(e) => eprintln!("[!] Error generating prometheus config: {}", e),
+                }
+
+                println!();
+                println!("[+] Load test scripts generated!");
+                println!("[*] Usage:");
+                println!("    bash {}", combined_path);
+                println!("    or");
+                println!("    bash {}", ab_path);
+            } else {
+                println!("[*] Apache Bench command:");
+                println!("    {}", LoadTestRunner::generate_ab_command(&config));
+                println!();
+                println!("[*] wrk command:");
+                println!("    wrk -t {} -c {} -d {}s {}",
+                    config.concurrent_users / 4.max(1),
+                    config.concurrent_users,
+                    config.duration_seconds,
+                    config.target_url
+                );
             }
         }
     }
