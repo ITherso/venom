@@ -8,6 +8,8 @@ pub mod sqli_expert;
 pub mod sqli_advanced;
 pub mod sqli_payloads;
 pub mod xss_expert;
+pub mod xss_advanced;
+pub mod xss_payloads;
 pub mod ssti_expert;
 pub mod parallel;
 pub mod scoring;
