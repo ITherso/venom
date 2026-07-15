@@ -1,12 +1,12 @@
-# 🐍 VENOM v0.3.0 - Rust Web Pentesting Framework
+# 🐍 VENOM v0.5.0 - Rust Web Pentesting Framework
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust 1.70+](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![GitHub](https://img.shields.io/badge/GitHub-ITherso%2Fvenom-blue.svg)](https://github.com/ITherso/venom)
 
-> **VENOM** — Enterprise-grade web pentesting framework in pure Rust. MITM proxy + vulnerability scanner + request interceptor + more.
+> **VENOM** — Enterprise-grade web pentesting framework in pure Rust. MITM proxy + vulnerability scanner + zero-day engine + post-exploitation + professional reports.
 
-**Status:** v0.3.0 STABLE | PHASE 1-3 Complete | Ready for Production Testing
+**Status:** v0.5.0 PRODUCTION | PHASE 1-5 Complete | Zero Day Detection | Professional Report Generation
 
 ---
 
@@ -126,6 +126,26 @@ cargo build --release
 - High confidence threshold
 - Automatic payload suggestions
 
+### ✅ PHASE 6: Professional Report Generation (NEW)
+| Feature | Status | Details |
+|---------|--------|---------|
+| **HTML Report Generator** | ✅ | Professional styled HTML templates |
+| **PDF Export** | ✅ | wkhtmltopdf integration for PDF generation |
+| **Vulnerability Details** | ✅ | Full vulnerability information per page |
+| **Risk Scoring** | ✅ | CVSS calculation + overall risk assessment |
+| **Remediation Guidance** | ✅ | Technical fixes + code examples for each finding |
+| **Executive Summary** | ✅ | High-level overview for stakeholders |
+| **Statistics Dashboard** | ✅ | Vulnerability counts, success rates, metrics |
+| **Finding Timeline** | ✅ | Detailed discovery dates and progression |
+
+**Professional-level reports ready for stakeholders:**
+- Page-by-page vulnerability documentation
+- Shows which vulnerabilities were found
+- Documents which exploits were used
+- Provides detailed remediation & protection guidance
+- Exportable in HTML and PDF formats
+- API integration for automated report generation
+
 ---
 
 ## 🏗️ Architecture
@@ -140,11 +160,36 @@ venom/
 │   │   ├── ca.rs        (CA generation)
 │   │   ├── history.rs   (DB storage)
 │   │   ├── http_parser.rs (HTTP parsing)
-│   │   └── interceptor.rs (Rule engine)
+│   │   ├── interceptor.rs (Rule engine)
+│   │   └── zeroday.rs   (Anomaly detection)
 │   │
 │   ├── scanner/         (Vulnerability Detection)
 │   │   ├── detector.rs  (Pattern-based detection)
 │   │   └── payloads.rs  (Payload sets)
+│   │
+│   ├── postexploit/     (Post-Exploitation + Evasion)
+│   │   ├── webshell.rs  (Webshell generators)
+│   │   ├── rce.rs       (Remote command execution)
+│   │   ├── c2.rs        (C2 framework)
+│   │   ├── persistence.rs (Persistence mechanisms)
+│   │   ├── lateral.rs   (Lateral movement)
+│   │   ├── privesc.rs   (Privilege escalation)
+│   │   ├── antiforensics.rs (Log/artifact removal)
+│   │   └── evasion.rs   (Detection evasion)
+│   │
+│   ├── api/             (REST API + Dashboard)
+│   │   ├── server.rs    (Axum web server)
+│   │   ├── handlers.rs  (API endpoints)
+│   │   ├── tasks.rs     (Task management)
+│   │   ├── websocket.rs (Real-time updates)
+│   │   ├── dashboard.html (Vue.js dashboard)
+│   │   └── performance.rs (Caching + pooling)
+│   │
+│   ├── reporting/       (Report Generation) ⭐ NEW
+│   │   ├── report.rs    (Report data structures)
+│   │   ├── html_generator.rs (HTML templates)
+│   │   ├── pdf_generator.rs (PDF export)
+│   │   └── mod.rs       (Module exports)
 │   │
 │   ├── repeater/        (Request Replay)
 │   ├── intruder/        (Fuzzing - WIP)
@@ -449,11 +494,31 @@ Contributions welcome! Areas:
 - ✅ No external AI API required
 - ✅ Pure algorithmic analysis
 
+**PHASE 6: Professional Report Generation** ⭐ NEW
+- ✅ HTML report generator with professional styling
+- ✅ PDF export via wkhtmltopdf
+- ✅ Page-by-page vulnerability documentation
+- ✅ Risk scoring algorithm (CVSS + vulnerability count weighting)
+- ✅ Executive summary with findings overview
+- ✅ Detailed vulnerability pages showing:
+  - Which vulnerabilities were found
+  - CVSS scores and severity levels
+  - Proof of concept and evidence
+  - Root cause analysis
+  - Technical fixes with code examples
+  - Remediation guidance and priority
+  - Testing procedures and references
+- ✅ Statistics dashboard (total/critical/high/medium/low counts)
+- ✅ Exploit tracking (successful/attempted)
+- ✅ Professional footer with metadata
+
 **VENOM NOW EXCEEDS BURP SUITE CAPABILITIES:**
 - Detects zero days Burp Suite cannot find
 - Proprietary anomaly engine
 - Behavioral vulnerability detection
 - Unknown vulnerability pattern recognition
+- Professional-level report generation
+- Multiple export formats (HTML, PDF)
 
 ### v0.4.0 - 2026-07-15
 - ✅ PHASE 4: Complete Post-Exploitation Framework
@@ -519,4 +584,4 @@ Contributions welcome! Areas:
 **For authorized security testing only**  
 **No liability for misuse**
 
-🐍 **VENOM v0.3.0** — Production-Ready Web Pentesting Framework
+🐍 **VENOM v0.5.0** — Enterprise-Grade Web Pentesting Framework with Zero Day Detection & Professional Reports
