@@ -1,5 +1,6 @@
 pub mod payloads;
 pub mod detector;
+pub mod exploiter;
 
 use crate::Result;
 use crate::proxy::http_parser::HttpRequest;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub use detector::{Vulnerability, VulnerabilityDetector};
+pub use exploiter::{Exploit, ExploitFinder};
 
 #[derive(Debug, Clone)]
 pub struct Scanner {

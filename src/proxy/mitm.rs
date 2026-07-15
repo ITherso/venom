@@ -213,7 +213,15 @@ where
                         if !vulns.is_empty() {
                             println!("[!] Vulnerabilities found: {}", vulns.len());
                             for v in &vulns {
-                                println!("    - {}: {}", v.vuln_type, v.evidence);
+                                println!("    - [{}] {}: {}", v.severity, v.vuln_type, v.evidence);
+
+                                // Show available exploits
+                                if !v.exploits.is_empty() {
+                                    println!("      Exploits available: {}", v.exploits.len());
+                                    for exp in &v.exploits {
+                                        println!("        • {} ({})", exp.title, exp.source);
+                                    }
+                                }
                             }
                         }
 

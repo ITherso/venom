@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::proxy::http_parser::HttpRequest;
 use std::collections::HashMap;
+use super::exploiter::{Exploit, ExploitFinder};
 
 #[derive(Debug, Clone)]
 pub struct Vulnerability {
@@ -11,6 +12,7 @@ pub struct Vulnerability {
     pub parameter: String,
     pub payload: String,
     pub evidence: String,
+    pub exploits: Vec<Exploit>, // Auto-discovered exploits
 }
 
 pub struct VulnerabilityDetector;
@@ -31,6 +33,9 @@ impl VulnerabilityDetector {
 
             for payload in sqli_payloads {
                 if req.path.contains(payload) {
+                    let exploits = ExploitFinder::find_exploits("SQL Injection", Some(&req.path))
+                        .unwrap_or_default();
+
                     vulns.push(Vulnerability {
                         id: uuid::Uuid::new_v4().to_string(),
                         vuln_type: "SQL Injection".to_string(),
@@ -39,6 +44,7 @@ impl VulnerabilityDetector {
                         parameter: "URL".to_string(),
                         payload: payload.to_string(),
                         evidence: format!("Found SQL payload in URL: {}", payload),
+                        exploits,
                     });
                 }
             }
@@ -60,6 +66,9 @@ impl VulnerabilityDetector {
 
         for payload in xss_payloads {
             if req.path.to_lowercase().contains(payload) {
+                let exploits = ExploitFinder::find_exploits("XSS", Some(&req.path))
+                    .unwrap_or_default();
+
                 vulns.push(Vulnerability {
                     id: uuid::Uuid::new_v4().to_string(),
                     vuln_type: "XSS".to_string(),
@@ -68,6 +77,7 @@ impl VulnerabilityDetector {
                     parameter: "URL".to_string(),
                     payload: payload.to_string(),
                     evidence: format!("Found XSS payload: {}", payload),
+                    exploits,
                 });
             }
         }
@@ -82,6 +92,9 @@ impl VulnerabilityDetector {
 
         for payload in ssti_payloads {
             if req.path.contains(payload) {
+                let exploits = ExploitFinder::find_exploits("SSTI", Some(&req.path))
+                    .unwrap_or_default();
+
                 vulns.push(Vulnerability {
                     id: uuid::Uuid::new_v4().to_string(),
                     vuln_type: "SSTI".to_string(),
@@ -90,6 +103,7 @@ impl VulnerabilityDetector {
                     parameter: "URL".to_string(),
                     payload: payload.to_string(),
                     evidence: format!("Found SSTI payload: {}", payload),
+                    exploits,
                 });
             }
         }
@@ -102,6 +116,9 @@ impl VulnerabilityDetector {
 
         if let Ok(body_str) = String::from_utf8(req.body.clone()) {
             if body_str.contains("<!DOCTYPE") && body_str.contains("ENTITY") {
+                let exploits = ExploitFinder::find_exploits("XXE", Some(&req.path))
+                    .unwrap_or_default();
+
                 vulns.push(Vulnerability {
                     id: uuid::Uuid::new_v4().to_string(),
                     vuln_type: "XXE".to_string(),
@@ -110,6 +127,7 @@ impl VulnerabilityDetector {
                     parameter: "Body".to_string(),
                     payload: "<!DOCTYPE ENTITY>".to_string(),
                     evidence: "Found XML with DOCTYPE ENTITY declaration".to_string(),
+                    exploits,
                 });
             }
         }
@@ -131,6 +149,9 @@ impl VulnerabilityDetector {
 
         for pattern in idor_patterns {
             if req.path.contains(pattern) && req.path.contains(|c: char| c.is_numeric()) {
+                let exploits = ExploitFinder::find_exploits("IDOR", Some(&req.path))
+                    .unwrap_or_default();
+
                 vulns.push(Vulnerability {
                     id: uuid::Uuid::new_v4().to_string(),
                     vuln_type: "IDOR".to_string(),
@@ -139,6 +160,7 @@ impl VulnerabilityDetector {
                     parameter: pattern.to_string(),
                     payload: "Numeric ID parameter".to_string(),
                     evidence: format!("Found IDOR pattern: {}", pattern),
+                    exploits,
                 });
             }
         }
@@ -159,6 +181,9 @@ impl VulnerabilityDetector {
 
         for pattern in ssrf_patterns {
             if req.path.contains(pattern) {
+                let exploits = ExploitFinder::find_exploits("SSRF", Some(&req.path))
+                    .unwrap_or_default();
+
                 vulns.push(Vulnerability {
                     id: uuid::Uuid::new_v4().to_string(),
                     vuln_type: "SSRF".to_string(),
@@ -167,6 +192,7 @@ impl VulnerabilityDetector {
                     parameter: pattern.to_string(),
                     payload: "External URL parameter".to_string(),
                     evidence: format!("Found SSRF parameter: {}", pattern),
+                    exploits,
                 });
             }
         }
