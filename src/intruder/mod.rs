@@ -1,6 +1,8 @@
 pub mod payloads;
 pub mod fuzzer;
 pub mod response_analyzer;
+pub mod macros;
+pub mod conditional;
 
 use crate::Result;
 use reqwest::Client;
@@ -10,6 +12,8 @@ use std::time::Instant;
 pub use fuzzer::Fuzzer;
 pub use payloads::PayloadGenerator;
 pub use response_analyzer::FuzzResponseAnalyzer;
+pub use macros::{Macro, MacroExecutor, MacroStep};
+pub use conditional::{ConditionalPayload, AdaptivePayloadEngine};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzConfig {
