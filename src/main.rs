@@ -1,6 +1,7 @@
-use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database, api::ApiServer, loadtest::{LoadTestRunner, profiles::{LoadProfile, LoadTestConfig}}};
+use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database, api::ApiServer, loadtest::{LoadTestRunner, profiles::{LoadProfile, LoadTestConfig}}, monitoring::{MetricsCollector, MetricsExporter}};
 use clap::{Parser, Subcommand};
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "VENOM")]
@@ -45,6 +46,12 @@ enum Commands {
         generate_scripts: bool,
         #[arg(long)]
         output_dir: Option<String>,
+    },
+    Metrics {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value = "9090")]
+        port: u16,
     },
 }
 
@@ -220,6 +227,18 @@ async fn main() {
                     config.duration_seconds,
                     config.target_url
                 );
+            }
+        }
+
+        Commands::Metrics { host, port } => {
+            println!("📊 VENOM - Metrics Exporter");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+            let metrics = Arc::new(MetricsCollector::new());
+            let exporter = MetricsExporter::new(metrics, &host, port);
+
+            if let Err(e) = exporter.start().await {
+                eprintln!("[!] Metrics exporter error: {}", e);
             }
         }
     }
