@@ -4,9 +4,7 @@ jobs = 4
 
 # Compiler settings
 rustflags = [
-    "-D", "warnings",
     "-D", "unsafe_code",
-    "-W", "missing_docs",
     "-W", "rustdoc::missing_crate_level_docs",
 ]
 

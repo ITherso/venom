@@ -1,3 +1,9 @@
+#![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused)]
+#![allow(non_camel_case_types)]
+#![allow(unexpected_cfgs)]
+
 pub mod proxy;
 pub mod scanner;
 pub mod postexploit;

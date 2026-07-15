@@ -1,13 +1,21 @@
 use std::fmt;
 
+/// VENOM error types
 #[derive(Debug)]
 pub enum Error {
+    /// Proxy-related error
     ProxyError(String),
+    /// Scanner-related error
     ScannerError(String),
+    /// Database-related error
     DatabaseError(String),
+    /// Network-related error
     NetworkError(String),
+    /// I/O error
     IoError(std::io::Error),
+    /// JSON parsing error
     JsonError(serde_json::Error),
+    /// HTTP request error
     ReqwestError(reqwest::Error),
 }
 
@@ -45,4 +53,5 @@ impl From<reqwest::Error> for Error {
     }
 }
 
+/// VENOM result type
 pub type Result<T> = std::result::Result<T, Error>;

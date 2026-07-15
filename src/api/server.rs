@@ -1,6 +1,6 @@
 use crate::Result;
 use axum::{
-    extract::{Path, State, Json},
+    extract::{Path, State, Json, ws::{WebSocket, WebSocketUpgrade}},
     http::StatusCode,
     response::Html,
     routing::{get, post, put},
@@ -10,6 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+use futures::{sink::SinkExt, stream::StreamExt};
 
 use super::handlers::{ApiHandlers, CreateTaskRequest, UpdateTaskRequest};
 use super::tasks::TaskManager;
@@ -65,6 +66,7 @@ impl ApiServer {
         Router::new()
             .route("/", get(dashboard))
             .route("/dashboard", get(dashboard))
+            .route("/ws", get(websocket_handler))
             .route("/api/health", get(health_check))
             .route("/api/tasks", post(create_task))
             .route("/api/tasks", get(list_tasks))
@@ -271,5 +273,28 @@ async fn get_stats(
                 "error": e.to_string()
             })),
         ),
+    }
+}
+
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State((_, _, broadcaster)): State<(Arc<TaskManager>, Arc<ApiHandlers>, Arc<WebSocketBroadcaster>)>,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(|socket| handle_websocket(socket, broadcaster))
+}
+
+async fn handle_websocket(socket: WebSocket, broadcaster: Arc<WebSocketBroadcaster>) {
+    let (mut sender, _receiver) = socket.split();
+    let mut rx = broadcaster.subscribe();
+
+    while let Ok(msg) = rx.recv().await {
+        let json_msg = serde_json::to_string(&msg).unwrap_or_default();
+        if sender
+            .send(axum::extract::ws::Message::Text(json_msg))
+            .await
+            .is_err()
+        {
+            break;
+        }
     }
 }

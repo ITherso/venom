@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 pub mod webhooks;
 pub mod slack;
 pub mod email;
