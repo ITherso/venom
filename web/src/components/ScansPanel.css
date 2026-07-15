@@ -1,0 +1,163 @@
+.scans-panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: #8b949e;
+}
+
+.empty-state p {
+  margin: 0 0 20px 0;
+  font-size: 14px;
+}
+
+.btn-primary {
+  background: #238636;
+  color: #ffffff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover {
+  background: #2ea043;
+}
+
+.scans-list {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.scan-item {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  transition: all 0.2s ease;
+}
+
+.scan-item:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0 15px rgba(88, 166, 255, 0.1);
+}
+
+.scan-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.scan-info h4 {
+  margin: 0 0 4px 0;
+  color: #c9d1d9;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.scan-info .target {
+  margin: 0;
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.scan-status {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.scan-vulns {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.vuln-badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+}
+
+.vuln-badge.critical {
+  background: #f85149;
+}
+
+.vuln-badge.high {
+  background: #ffc107;
+}
+
+.vuln-badge.medium {
+  background: #58a6ff;
+}
+
+.vuln-badge.low {
+  background: #3fb950;
+}
+
+.scan-progress {
+  margin-bottom: 12px;
+}
+
+.progress-bar {
+  display: flex;
+  height: 6px;
+  background: #30363d;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-critical {
+  background: #f85149;
+  transition: width 0.3s ease;
+}
+
+.progress-high {
+  background: #ffc107;
+  transition: width 0.3s ease;
+}
+
+.scan-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid #30363d;
+  font-size: 12px;
+  color: #8b949e;
+}
+
+.scan-time {
+  flex: 1;
+}
+
+.btn-secondary {
+  background: none;
+  border: 1px solid #30363d;
+  color: #58a6ff;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover {
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.1);
+}

@@ -1,0 +1,165 @@
+.sla-status {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.sla-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 15px;
+}
+
+.sla-metric {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 15px;
+  transition: all 0.2s ease;
+}
+
+.sla-metric.compliant {
+  border-left: 4px solid #3fb950;
+}
+
+.sla-metric.violated {
+  border-left: 4px solid #f85149;
+  background: rgba(248, 81, 73, 0.05);
+}
+
+.metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.metric-header h4 {
+  margin: 0;
+  color: #c9d1d9;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sla-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.sla-badge.platinum {
+  background: #58a6ff;
+  color: #0d1117;
+}
+
+.sla-badge.gold {
+  background: #ffc107;
+  color: #0d1117;
+}
+
+.sla-badge.silver {
+  background: #a0aec0;
+  color: #0d1117;
+}
+
+.sla-badge.bronze {
+  background: #cd7f32;
+  color: #fff;
+}
+
+.metric-value {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.metric-value .current {
+  color: #58a6ff;
+  font-weight: 600;
+}
+
+.metric-value .target {
+  color: #8b949e;
+}
+
+.metric-progress {
+  height: 6px;
+  background: #30363d;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #3fb950, #1f6feb);
+  transition: width 0.3s ease;
+}
+
+.sla-violations {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 15px;
+}
+
+.sla-violations h3 {
+  margin: 0 0 15px 0;
+  color: #c9d1d9;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.violation {
+  padding: 10px 0;
+  border-bottom: 1px solid #30363d;
+  font-size: 12px;
+}
+
+.violation:last-child {
+  border-bottom: none;
+}
+
+.violation-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.violation .severity {
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.violation.violation-critical .severity {
+  background: rgba(248, 81, 73, 0.3);
+  color: #f85149;
+}
+
+.violation.violation-high .severity {
+  background: rgba(255, 193, 7, 0.3);
+  color: #ffc107;
+}
+
+.violation.violation-medium .severity {
+  background: rgba(88, 166, 255, 0.3);
+  color: #58a6ff;
+}
+
+.violation.violation-low .severity {
+  background: rgba(63, 185, 80, 0.3);
+  color: #3fb950;
+}
+
+.violation .time {
+  color: #8b949e;
+  font-size: 11px;
+}
+
+.violation .description {
+  color: #c9d1d9;
+  margin: 0;
+}

@@ -1,0 +1,109 @@
+.status-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.status-card:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0 20px rgba(88, 166, 255, 0.15);
+}
+
+.status-card.status-healthy {
+  border-left: 4px solid #3fb950;
+}
+
+.status-card.status-warning {
+  border-left: 4px solid #ffc107;
+}
+
+.status-card.status-critical {
+  border-left: 4px solid #f85149;
+}
+
+.status-card.status-running {
+  border-left: 4px solid #58a6ff;
+}
+
+.status-card.status-stopped {
+  border-left: 4px solid #8b949e;
+}
+
+.status-card.status-degraded {
+  border-left: 4px solid #ffc107;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 15px;
+  gap: 10px;
+}
+
+.card-icon {
+  font-size: 24px;
+}
+
+.card-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #c9d1d9;
+  margin: 0;
+  flex: 1;
+}
+
+.status-badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.status-badge.healthy {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.status-badge.warning {
+  background: rgba(255, 193, 7, 0.15);
+  color: #ffc107;
+}
+
+.status-badge.critical {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+.status-badge.running {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+}
+
+.status-badge.stopped {
+  background: rgba(139, 148, 158, 0.15);
+  color: #8b949e;
+}
+
+.status-badge.degraded {
+  background: rgba(255, 193, 7, 0.15);
+  color: #ffc107;
+}
+
+.card-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #58a6ff;
+  margin-bottom: 8px;
+}
+
+.card-details {
+  font-size: 12px;
+  color: #8b949e;
+  line-height: 1.5;
+}
