@@ -79,8 +79,9 @@ async fn main() {
                         println!("[+] Found {} vulnerabilities:\n", vulns.len());
                         for v in vulns {
                             println!("  [{}] {} - {}", v.severity, v.vuln_type, v.url);
+                            println!("      Param: {}", v.parameter);
                             println!("      Payload: {}", v.payload);
-                            println!("      Status: {}\n", v.response_code);
+                            println!("      Evidence: {}\n", v.evidence);
                         }
                     }
                 }
