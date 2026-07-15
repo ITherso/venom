@@ -34,6 +34,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Install Rustls crypto provider
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     match cli.command {
