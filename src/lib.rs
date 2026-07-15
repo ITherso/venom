@@ -1,5 +1,6 @@
 pub mod proxy;
 pub mod scanner;
+pub mod postexploit;
 pub mod repeater;
 pub mod intruder;
 pub mod decoder;
