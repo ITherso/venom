@@ -852,6 +852,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "html-escape"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46c1ff2d1cbf39efe5af0900ced8a069b5e61557a17544eb0c4a50239937389e"
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2662,6 +2668,7 @@ dependencies = [
  "dirs",
  "futures",
  "hex",
+ "html-escape",
  "http",
  "hyper",
  "lazy_static",
