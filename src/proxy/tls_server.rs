@@ -1,9 +1,10 @@
 use crate::Result;
 use rustls::pki_types::{PrivateKeyDer, ServerName};
-use rustls::ServerConfig;
+use rustls::{ServerConfig, ClientConfig};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio_rustls::TlsStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 use super::tls::CertCache;
 
 pub struct TlsServer {
@@ -19,11 +20,9 @@ impl TlsServer {
         &self,
         stream: TcpStream,
         domain: &str,
-    ) -> Result<TlsStream<TcpStream>> {
-        // Get certificate for domain
+    ) -> Result<tokio_rustls::server::TlsStream<TcpStream>> {
         let (cert_pem, key_pem) = self.cert_cache.get_or_generate_cert(domain)?;
 
-        // Parse certificate and key
         let mut cert_reader = std::io::Cursor::new(&cert_pem);
         let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -35,15 +34,12 @@ impl TlsServer {
             .map(PrivateKeyDer::Pkcs8)
             .ok_or_else(|| crate::Error::ProxyError("No valid key found".into()))?;
 
-        // Create TLS config
         let config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|e| crate::Error::ProxyError(e.to_string()))?;
 
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-
-        // Perform TLS handshake
+        let acceptor = TlsAcceptor::from(Arc::new(config));
         let tls_stream = acceptor
             .accept(stream)
             .await
@@ -56,21 +52,19 @@ impl TlsServer {
         &self,
         stream: TcpStream,
         domain: &str,
-    ) -> Result<TlsStream<TcpStream>> {
-        let server_name = ServerName::try_from(domain)
+    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+        let server_name = ServerName::try_from(domain.to_string())
             .map_err(|_| crate::Error::ProxyError("Invalid domain".into()))?;
 
-        // Use system certificates for server connection
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.iter().cloned().collect(),
         };
 
-        let config = rustls::ClientConfig::builder()
+        let config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-
+        let connector = TlsConnector::from(Arc::new(config));
         let tls_stream = connector
             .connect(server_name, stream)
             .await

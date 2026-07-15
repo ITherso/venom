@@ -117,9 +117,6 @@ async fn handle_connect_tunnel(
 
     println!("[+] CONNECT tunnel to: {}", domain);
 
-    // Get or generate certificate for domain
-    let (cert_pem, key_pem) = tls_config.cert_cache.get_or_generate_cert(domain)?;
-
     // Send 200 OK to client
     let response = b"HTTP/1.1 200 Connection Established\r\n\r\n";
     client
@@ -127,13 +124,7 @@ async fn handle_connect_tunnel(
         .await
         .map_err(|e| crate::Error::ProxyError(e.to_string()))?;
 
-    println!("[+] Established tunnel for {}", domain);
-
-    // Note: Full TLS termination requires rustls server setup
-    // This is simplified; real impl needs:
-    // 1. rustls::ServerConfig with generated cert
-    // 2. tokio_rustls::TlsStream wrapper
-    // 3. Request/response parsing from decrypted stream
+    println!("[+] Sent 200 OK, tunnel ready for {}. TLS termination in PHASE 2.2", domain);
 
     Ok(())
 }
