@@ -2,6 +2,7 @@ use crate::Result;
 use axum::{
     extract::{Path, State, Json},
     http::StatusCode,
+    response::Html,
     routing::{get, post, put},
     Router,
 };
@@ -62,6 +63,8 @@ impl ApiServer {
         let broadcaster = Arc::clone(&self.broadcaster);
 
         Router::new()
+            .route("/", get(dashboard))
+            .route("/dashboard", get(dashboard))
             .route("/api/health", get(health_check))
             .route("/api/tasks", post(create_task))
             .route("/api/tasks", get(list_tasks))
@@ -83,6 +86,10 @@ impl ApiServer {
 }
 
 // Handlers
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
+}
+
 async fn health_check(
     State((_, handlers, _)): State<(Arc<TaskManager>, Arc<ApiHandlers>, Arc<WebSocketBroadcaster>)>,
 ) -> (StatusCode, Json<serde_json::Value>) {

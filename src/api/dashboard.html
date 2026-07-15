@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VENOM - Pentesting Framework Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1a1f3a 0%, #2d1b4e 100%);
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            border-left: 5px solid #ff4444;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            color: #ff6b6b;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #b0b0b0;
+            font-size: 0.9em;
+        }
+
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .status-card {
+            background: #1a1f3a;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 3px solid #44ff44;
+            text-align: center;
+        }
+
+        .status-card.running {
+            border-left-color: #ffaa00;
+        }
+
+        .status-card.failed {
+            border-left-color: #ff4444;
+        }
+
+        .status-card.completed {
+            border-left-color: #44ff44;
+        }
+
+        .status-card h3 {
+            font-size: 2em;
+            color: #44ff44;
+            margin-bottom: 5px;
+        }
+
+        .status-card p {
+            color: #888;
+            font-size: 0.8em;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        @media (max-width: 1024px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: #1a1f3a;
+            border: 1px solid #2d3e5f;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .panel h2 {
+            color: #ff6b6b;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            border-bottom: 2px solid #ff4444;
+            padding-bottom: 10px;
+        }
+
+        .task-item {
+            background: #0f1424;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            border-left: 3px solid #44ff44;
+        }
+
+        .task-item.pending {
+            border-left-color: #aaaaaa;
+        }
+
+        .task-item.running {
+            border-left-color: #ffaa00;
+        }
+
+        .task-item.failed {
+            border-left-color: #ff4444;
+        }
+
+        .task-item h4 {
+            color: #44ff44;
+            margin-bottom: 5px;
+        }
+
+        .task-item .status {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            margin-right: 10px;
+        }
+
+        .task-item .status.pending {
+            background: #444;
+            color: #aaa;
+        }
+
+        .task-item .status.running {
+            background: #664400;
+            color: #ffaa00;
+        }
+
+        .task-item .status.completed {
+            background: #004400;
+            color: #44ff44;
+        }
+
+        .task-item .status.failed {
+            background: #440000;
+            color: #ff4444;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 5px;
+            background: #333;
+            border-radius: 3px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #44ff44, #ffaa00);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .vuln-item {
+            background: #0f1424;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            border-left: 3px solid #ff4444;
+        }
+
+        .vuln-item.high {
+            border-left-color: #ff6b6b;
+        }
+
+        .vuln-item.medium {
+            border-left-color: #ffaa00;
+        }
+
+        .vuln-item.low {
+            border-left-color: #44ff44;
+        }
+
+        .severity-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+
+        .severity-badge.critical {
+            background: #cc0000;
+            color: #fff;
+        }
+
+        .severity-badge.high {
+            background: #ff6b6b;
+            color: #000;
+        }
+
+        .severity-badge.medium {
+            background: #ffaa00;
+            color: #000;
+        }
+
+        .severity-badge.low {
+            background: #44ff44;
+            color: #000;
+        }
+
+        .c2-console {
+            background: #000;
+            border: 1px solid #44ff44;
+            border-radius: 5px;
+            padding: 10px;
+            font-size: 0.85em;
+            height: 300px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .c2-console .log-line {
+            color: #44ff44;
+            margin-bottom: 3px;
+        }
+
+        .c2-console .log-line.error {
+            color: #ff4444;
+        }
+
+        .c2-console .log-line.warning {
+            color: #ffaa00;
+        }
+
+        .c2-input {
+            display: flex;
+            gap: 10px;
+        }
+
+        .c2-input input {
+            flex: 1;
+            background: #1a1f3a;
+            border: 1px solid #44ff44;
+            color: #44ff44;
+            padding: 8px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .c2-input input:focus {
+            outline: none;
+            border-color: #ffaa00;
+        }
+
+        .c2-input button {
+            background: #44ff44;
+            color: #000;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .c2-input button:hover {
+            background: #66ff66;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        button {
+            background: #ff4444;
+            color: #fff;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+        }
+
+        button:hover {
+            background: #ff6b6b;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #666;
+            padding: 30px;
+        }
+
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #44ff44;
+            margin-right: 5px;
+            animation: pulse 1s infinite;
+        }
+
+        .connection-status.disconnected {
+            background: #ff4444;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .scrollable {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a1f3a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #44ff44;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #66ff66;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="header">
+                <h1>🐍 VENOM Dashboard</h1>
+                <p>
+                    <span class="connection-status" :class="{ disconnected: !connected }"></span>
+                    API: {{ apiUrl }} | Connected: {{ connected ? 'Yes' : 'No' }}
+                </p>
+            </div>
+
+            <div class="status-bar">
+                <div class="status-card">
+                    <h3>{{ stats.total }}</h3>
+                    <p>Total Tasks</p>
+                </div>
+                <div class="status-card running">
+                    <h3>{{ stats.running }}</h3>
+                    <p>Running</p>
+                </div>
+                <div class="status-card">
+                    <h3>{{ stats.completed }}</h3>
+                    <p>Completed</p>
+                </div>
+                <div class="status-card failed">
+                    <h3>{{ stats.failed }}</h3>
+                    <p>Failed</p>
+                </div>
+                <div class="status-card">
+                    <h3>{{ (stats.success_rate * 100).toFixed(1) }}%</h3>
+                    <p>Success Rate</p>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button @click="createScanTask">Start Scan</button>
+                <button @click="createExploitTask">Execute Exploit</button>
+                <button @click="refreshStats">Refresh Stats</button>
+            </div>
+
+            <div class="dashboard">
+                <!-- Tasks Panel -->
+                <div class="panel">
+                    <h2>📋 Recent Tasks</h2>
+                    <div class="scrollable">
+                        <div v-if="tasks.length === 0" class="empty-state">
+                            No tasks yet
+                        </div>
+                        <div v-for="task in tasks" :key="task.id" class="task-item" :class="task.status">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <h4>{{ task.task_type }}</h4>
+                                    <span class="status" :class="task.status">{{ task.status }}</span>
+                                    <small>{{ task.target }}</small>
+                                </div>
+                                <small style="color: #888;">{{ formatTime(task.created_at) }}</small>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" :style="{ width: (task.progress * 100) + '%' }"></div>
+                            </div>
+                            <small style="color: #888;">{{ (task.progress * 100).toFixed(0) }}%</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Vulnerabilities Panel -->
+                <div class="panel">
+                    <h2>🚨 Vulnerabilities</h2>
+                    <div class="scrollable">
+                        <div v-if="vulnerabilities.length === 0" class="empty-state">
+                            No vulnerabilities found
+                        </div>
+                        <div v-for="vuln in vulnerabilities" :key="vuln.id" class="vuln-item" :class="vuln.severity">
+                            <div style="display: flex; justify-content: space-between;">
+                                <div>
+                                    <h4>{{ vuln.type }}</h4>
+                                    <small>{{ vuln.url }}</small>
+                                </div>
+                                <span class="severity-badge" :class="vuln.severity">{{ vuln.severity.toUpperCase() }}</span>
+                            </div>
+                            <small style="color: #888;">Param: {{ vuln.parameter }}</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- C2 Console -->
+            <div class="panel">
+                <h2>💻 C2 Console</h2>
+                <div class="c2-console">
+                    <div v-for="(log, idx) in c2Logs" :key="idx" class="log-line" :class="log.type">
+                        [{{ log.time }}] {{ log.message }}
+                    </div>
+                </div>
+                <div class="c2-input">
+                    <input
+                        v-model="c2Command"
+                        @keyup.enter="sendC2Command"
+                        placeholder="Enter agent command..."
+                    >
+                    <button @click="sendC2Command">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, reactive, onMounted, onUnmounted } = Vue;
+
+        createApp({
+            setup() {
+                const apiUrl = 'http://127.0.0.1:3000/api';
+                const connected = ref(false);
+                const tasks = ref([]);
+                const vulnerabilities = ref([]);
+                const c2Logs = ref([]);
+                const c2Command = ref('');
+                const stats = reactive({
+                    total: 0,
+                    running: 0,
+                    completed: 0,
+                    failed: 0,
+                    pending: 0,
+                    success_rate: 0
+                });
+
+                let ws = null;
+                let refreshInterval = null;
+
+                const connectWebSocket = () => {
+                    ws = new WebSocket('ws://127.0.0.1:3000/ws');
+
+                    ws.onopen = () => {
+                        connected.value = true;
+                        addC2Log('Connected to VENOM API', 'info');
+                    };
+
+                    ws.onmessage = (event) => {
+                        const msg = JSON.parse(event.data);
+                        handleWebSocketMessage(msg);
+                    };
+
+                    ws.onerror = () => {
+                        connected.value = false;
+                        addC2Log('WebSocket error', 'error');
+                    };
+
+                    ws.onclose = () => {
+                        connected.value = false;
+                        addC2Log('Disconnected from API', 'warning');
+                        setTimeout(connectWebSocket, 3000);
+                    };
+                };
+
+                const handleWebSocketMessage = (msg) => {
+                    switch(msg.message_type) {
+                        case 'task_update':
+                            refreshTasks();
+                            break;
+                        case 'scan_result':
+                            addVulnerability(msg.data);
+                            break;
+                        case 'c2_callback':
+                            addC2Log(`Agent ${msg.data.agent_id}: ${msg.data.output}`, 'info');
+                            break;
+                        case 'error':
+                            addC2Log(msg.data.message, 'error');
+                            break;
+                    }
+                };
+
+                const addVulnerability = (data) => {
+                    vulnerabilities.value.unshift({
+                        id: Date.now(),
+                        type: data.vulnerability_type,
+                        url: data.scan_id,
+                        parameter: 'unknown',
+                        severity: data.severity.toLowerCase()
+                    });
+                    if (vulnerabilities.value.length > 20) {
+                        vulnerabilities.value.pop();
+                    }
+                };
+
+                const addC2Log = (message, type = 'info') => {
+                    const now = new Date().toLocaleTimeString();
+                    c2Logs.value.push({ message, type, time: now });
+                    if (c2Logs.value.length > 100) {
+                        c2Logs.value.shift();
+                    }
+                    // Auto-scroll to bottom
+                    setTimeout(() => {
+                        const console = document.querySelector('.c2-console');
+                        if (console) console.scrollTop = console.scrollHeight;
+                    }, 0);
+                };
+
+                const refreshTasks = async () => {
+                    try {
+                        const response = await axios.get(`${apiUrl}/tasks`);
+                        if (response.data.success) {
+                            tasks.value = response.data.data.slice(0, 10).reverse();
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch tasks:', e);
+                    }
+                };
+
+                const refreshStats = async () => {
+                    try {
+                        const response = await axios.get(`${apiUrl}/stats`);
+                        if (response.data.success) {
+                            Object.assign(stats, response.data.data);
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch stats:', e);
+                    }
+                };
+
+                const createScanTask = async () => {
+                    try {
+                        const response = await axios.post(`${apiUrl}/tasks`, {
+                            task_type: 'scan',
+                            target: 'http://example.com',
+                            payload: null
+                        });
+                        if (response.data.success) {
+                            addC2Log(`Scan task created: ${response.data.data.task_id.substring(0, 8)}...`, 'info');
+                            refreshTasks();
+                        }
+                    } catch (e) {
+                        addC2Log(`Failed to create scan: ${e.message}`, 'error');
+                    }
+                };
+
+                const createExploitTask = async () => {
+                    try {
+                        const response = await axios.post(`${apiUrl}/tasks`, {
+                            task_type: 'exploit',
+                            target: 'http://example.com',
+                            payload: 'SQL Injection'
+                        });
+                        if (response.data.success) {
+                            addC2Log(`Exploit task created: ${response.data.data.task_id.substring(0, 8)}...`, 'info');
+                            refreshTasks();
+                        }
+                    } catch (e) {
+                        addC2Log(`Failed to create exploit: ${e.message}`, 'error');
+                    }
+                };
+
+                const sendC2Command = async () => {
+                    if (!c2Command.value.trim()) return;
+
+                    const cmd = c2Command.value;
+                    addC2Log(`> ${cmd}`, 'info');
+                    c2Command.value = '';
+
+                    try {
+                        const response = await axios.post(`${apiUrl}/tasks`, {
+                            task_type: 'c2_command',
+                            target: 'agent-1',
+                            payload: cmd
+                        });
+                        if (response.data.success) {
+                            addC2Log(`Command sent to agent`, 'info');
+                        }
+                    } catch (e) {
+                        addC2Log(`Command failed: ${e.message}`, 'error');
+                    }
+                };
+
+                const formatTime = (dateStr) => {
+                    if (!dateStr) return 'N/A';
+                    const date = new Date(dateStr);
+                    return date.toLocaleTimeString();
+                };
+
+                onMounted(() => {
+                    connectWebSocket();
+                    refreshStats();
+                    refreshTasks();
+
+                    refreshInterval = setInterval(() => {
+                        refreshStats();
+                        refreshTasks();
+                    }, 5000);
+
+                    addC2Log('VENOM Dashboard initialized', 'info');
+                });
+
+                onUnmounted(() => {
+                    if (ws) ws.close();
+                    if (refreshInterval) clearInterval(refreshInterval);
+                });
+
+                return {
+                    apiUrl,
+                    connected,
+                    tasks,
+                    vulnerabilities,
+                    c2Logs,
+                    c2Command,
+                    stats,
+                    createScanTask,
+                    createExploitTask,
+                    sendC2Command,
+                    refreshStats,
+                    formatTime
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
