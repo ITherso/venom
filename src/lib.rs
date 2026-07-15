@@ -20,6 +20,7 @@ pub mod performance;
 pub mod security;
 pub mod compliance;
 pub mod testing;
+pub mod observability;
 pub mod error;
 
 pub use error::{Error, Result};
