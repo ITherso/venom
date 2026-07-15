@@ -9,6 +9,7 @@ pub mod api;
 pub mod reporting;
 pub mod loadtest;
 pub mod monitoring;
+pub mod cache;
 pub mod error;
 
 pub use error::{Error, Result};
