@@ -17,6 +17,7 @@ pub mod advanced;
 pub mod enterprise;
 pub mod cli;
 pub mod performance;
+pub mod security;
 pub mod error;
 
 pub use error::{Error, Result};
