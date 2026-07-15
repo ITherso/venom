@@ -5,6 +5,7 @@ pub mod repeater;
 pub mod intruder;
 pub mod decoder;
 pub mod database;
+pub mod api;
 pub mod error;
 
 pub use error::{Error, Result};

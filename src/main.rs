@@ -1,4 +1,4 @@
-use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database};
+use venom::{proxy::MitmServer, scanner::Scanner, repeater::Repeater, database, api::ApiServer};
 use clap::{Parser, Subcommand};
 use std::path::Path;
 
@@ -16,6 +16,12 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value = "8080")]
+        port: u16,
+    },
+    Api {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value = "3000")]
         port: u16,
     },
     Scanner {
@@ -89,6 +95,20 @@ async fn main() {
                     }
                 }
                 Err(e) => eprintln!("[!] Scan error: {}", e),
+            }
+        }
+
+        Commands::Api { host, port } => {
+            println!("🔴 VENOM - API Server");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("[+] API listening on http://{}:{}", host, port);
+            println!("[+] Task Management: POST /api/tasks");
+            println!("[+] WebSocket: ws://{}:{}/ws", host, port);
+            println!("[+] Dashboard: http://{}:{}/dashboard", host, port);
+
+            let api_server = ApiServer::new(&host, port);
+            if let Err(e) = api_server.start().await {
+                eprintln!("[!] API error: {}", e);
             }
         }
 

@@ -32,6 +32,9 @@ hex = "0.4"
 urlencoding = "2"
 num_cpus = "1"
 dirs = "5"
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 
 [profile.release]
 opt-level = 3
