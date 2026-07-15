@@ -91,7 +91,7 @@ async fn handle_client_connection(
 
     // Parse CONNECT request (for HTTPS)
     if request_line.starts_with("CONNECT") {
-        handle_connect_tunnel(&mut client, &request_line, tls_config, history).await?;
+        handle_connect_tunnel(client, &request_line, tls_config, history).await?;
     } else {
         // Handle HTTP request
         handle_http_request(&mut client, &request_line, history).await?;
@@ -101,12 +101,11 @@ async fn handle_client_connection(
 }
 
 async fn handle_connect_tunnel(
-    client: &mut TcpStream,
+    mut client: TcpStream,
     request_line: &str,
     tls_config: Arc<TlsConfig>,
     history: Arc<ProxyHistory>,
 ) -> Result<()> {
-    let mut client_owned = client;
     // Parse: CONNECT example.com:443 HTTP/1.1
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
