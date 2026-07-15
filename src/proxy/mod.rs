@@ -1,8 +1,13 @@
+pub mod history;
+pub mod ca;
+
 use crate::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use history::ProxyHistory;
+use sqlx::SqlitePool;
 
 #[derive(Clone)]
 pub struct ProxyConfig {
@@ -11,20 +16,22 @@ pub struct ProxyConfig {
 
 pub struct MitmProxy {
     config: ProxyConfig,
-    listener: Arc<tokio::sync::Mutex<Option<TcpListener>>>,
+    history: Arc<ProxyHistory>,
 }
 
 impl MitmProxy {
-    pub async fn new(host: &str, port: u16) -> Result<Self> {
+    pub async fn new(host: &str, port: u16, pool: SqlitePool) -> Result<Self> {
         let addr = format!("{}:{}", host, port)
             .parse::<SocketAddr>()
             .map_err(|_| crate::Error::ProxyError("Invalid address".into()))?;
+
+        let history = ProxyHistory::new(pool);
 
         Ok(Self {
             config: ProxyConfig {
                 listen_addr: addr,
             },
-            listener: Arc::new(tokio::sync::Mutex::new(None)),
+            history: Arc::new(history),
         })
     }
 
