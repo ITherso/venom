@@ -80,15 +80,20 @@ cargo build --release
 | **Interception Actions** | ✅ | Drop, modify, log, pass-through |
 | **Modification Rules** | ✅ | URL, method, header, body rules |
 
-### ✅ PHASE 3: Vulnerability Scanner
-| Vulnerability Type | Status | Detection |
-|-------------------|--------|-----------|
-| **SQL Injection** | ✅ | String patterns: quotes, UNION, DROP |
-| **XSS** | ✅ | Script tags, event handlers |
-| **SSTI** | ✅ | Template syntax: `{{`, `${`, `<%` |
-| **XXE** | ✅ | XML DOCTYPE declarations |
-| **IDOR** | ✅ | ID parameters in URLs |
-| **SSRF** | ✅ | URL parameters: `url=`, `fetch=`, `proxy=` |
+### ✅ PHASE 3: Vulnerability Scanner + Exploit Finder
+| Vulnerability Type | Detection | Exploit Discovery |
+|-------------------|-----------|------------------|
+| **SQL Injection** | ✅ Patterns | ✅ UNION/Time-based |
+| **XSS** | ✅ Script tags | ✅ Reflected injection |
+| **SSTI** | ✅ Template syntax | ✅ Code execution |
+| **XXE** | ✅ DOCTYPE | ✅ File read/ENTITY |
+| **IDOR** | ✅ ID parameters | ✅ Enumeration |
+| **SSRF** | ✅ URL parameters | ✅ Internal network |
+
+**Auto-Exploit Discovery:**
+- Searchsploit integration (queries EDB)
+- Fallback payload generation for all 6 types
+- Exploit metadata: title, severity, source, CVE links
 
 ---
 
@@ -149,11 +154,14 @@ HTTPS Interception → HTTP Parsing → Vulnerability Scanning →
 Request Modification → Database Logging → Target Forwarding
 ```
 
-### Vulnerability Detection
-- Passive scanning of all traffic
-- Pattern-based detection (no sending payloads)
+### Vulnerability Detection & Auto-Exploit
+- Passive scanning of all traffic (pattern-based)
 - Evidence generation for each finding
 - Severity levels (Critical, High)
+- **Auto-discover exploits** for detected vulnerabilities
+- Searchsploit integration (queries EDB if available)
+- Fallback exploit payload suggestions
+- Display available exploits in real-time
 
 ### Request Interception
 - URL-based rules
@@ -398,6 +406,15 @@ Contributions welcome! Areas:
 ---
 
 ## 📝 Changelog
+
+### v0.3.3 - 2026-07-15
+- ✅ PHASE 3.1: Auto-Exploit Discovery
+- ✅ Searchsploit integration (EDB queries)
+- ✅ Exploit payload generation for all 6 vuln types
+- ✅ Exploit linking to vulnerability detections
+- ✅ Console output shows available exploits
+- ✅ Exploit metadata: title, source, CVE links
+- ⏳ Exploit execution API (next)
 
 ### v0.3.2 - 2026-07-15
 - ✅ PHASE 2.3: Full HTTPS Interception Pipeline
