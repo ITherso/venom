@@ -152,7 +152,7 @@ mod tests {
         interceptor.add_rule(InterceptionRule {
             id: "1".to_string(),
             enabled: true,
-            condition: InterceptionCondition::UrlContains("/api"),
+            condition: InterceptionCondition::UrlContains("/api".to_string()),
             action: InterceptionAction::LogOnly,
         });
 

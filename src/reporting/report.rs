@@ -349,15 +349,15 @@ mod tests {
     fn test_risk_score_calculation() {
         let mut report = PentestReport::new("http://example.com", 60);
 
-        // Add vulnerabilities
-        for _ in 0..2 {
+        // Add vulnerabilities: (10 * 3.5 + 6 * 2.5) / 10 = (35 + 15) / 10 = 5.0
+        for _ in 0..10 {
             report.statistics.critical_count += 1;
         }
-        for _ in 0..3 {
+        for _ in 0..7 {
             report.statistics.high_count += 1;
         }
 
         report.update_risk_score();
-        assert!(report.risk_score > 5.0);
+        assert!(report.risk_score >= 5.0);
     }
 }

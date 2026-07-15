@@ -340,8 +340,9 @@ mod tests {
         let script = LoadTestRunner::generate_wrk_script(&config);
 
         assert!(script.contains("target.com"));
-        assert!(script.contains("POST") || script.contains("GET"));
         assert!(script.contains("VENOM Load Test Script"));
+        assert!(script.contains("wrk.path"));
+        assert!(script.contains("response = function"));
     }
 
     #[test]

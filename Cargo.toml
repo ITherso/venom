@@ -38,6 +38,7 @@ tower-http = { version = "0.5", features = ["trace", "cors"] }
 futures = "0.3"
 sha2 = "0.10"
 html-escape = "0.2"
+tempfile = "3.8"
 
 [profile.release]
 opt-level = 3

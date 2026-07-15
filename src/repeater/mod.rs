@@ -177,8 +177,8 @@ pub struct ResponseComparison {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_repeater_creation() {
+    #[tokio::test]
+    async fn test_repeater_creation() {
         let repeater = Repeater::new();
         assert!(repeater.send("http://localhost", "GET", None).await.is_err() || true);
     }
