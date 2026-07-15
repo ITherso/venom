@@ -58,7 +58,7 @@ cargo build --release
 
 ---
 
-## 📊 What's Included (v0.3.0)
+## 📊 What's Included (v0.4.0)
 
 ### ✅ PHASE 1: Proxy Foundation
 | Feature | Status | Details |
@@ -94,6 +94,19 @@ cargo build --release
 - Searchsploit integration (queries EDB)
 - Fallback payload generation for all 6 types
 - Exploit metadata: title, severity, source, CVE links
+
+### ✅ PHASE 4: Post-Exploitation (NEW)
+| Feature | Status | Details |
+|---------|--------|---------|
+| **Webshell Generator** | ✅ | PHP, JSP, ASPX, Python (simple + obfuscated) |
+| **RCE Executor** | ✅ | System commands, file I/O, system info |
+| **Reverse Shells** | ✅ | bash, sh, python, perl, ruby, php, nc, PowerShell |
+| **C2 Framework** | ✅ | Agent management, task queueing, stagers |
+| **Persistence** | ✅ | Cron, Registry, Systemd, LaunchDaemon, SSH |
+| **Lateral Movement** | ✅ | PsExec, WMI, SSH, Pass the Hash, Kerberoasting |
+| **Privilege Escalation** | ✅ | Sudo, SUID, Kernel exploits, UAC bypass, Potato |
+| **Anti-Forensics** | ✅ | Log clearing, history wipe, timeline manipulation |
+| **Evasion** | ✅ | AMSI/ETW bypass, Defender disable, DLL injection |
 
 ---
 
@@ -406,6 +419,18 @@ Contributions welcome! Areas:
 ---
 
 ## 📝 Changelog
+
+### v0.4.0 - 2026-07-15
+- ✅ PHASE 4: Complete Post-Exploitation Framework
+- ✅ Webshell generator (PHP, JSP, ASPX, Python)
+- ✅ RCE executor with system commands
+- ✅ Reverse shell payloads (8 variants)
+- ✅ C2 framework with agent management
+- ✅ Persistence: Cron, Registry, Systemd, LaunchDaemon, SSH
+- ✅ Lateral movement: PsExec, WMI, SSH, Pass the Hash, Kerberoasting
+- ✅ Privilege escalation: 9 techniques (Sudo, SUID, UAC, Potato, Polkit)
+- ✅ Anti-forensics: Log clearing, syslog wipe, artifact removal
+- ✅ Evasion: AMSI bypass, ETW disable, DLL injection, hook avoidance
 
 ### v0.3.3 - 2026-07-15
 - ✅ PHASE 3.1: Auto-Exploit Discovery
