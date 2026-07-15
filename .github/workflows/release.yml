@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-before-release:
+    name: Test Before Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run all tests
+        run: cargo test --all --verbose
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  build-release:
+    name: Build Release
+    needs: test-before-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: venom
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: venom
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: venom
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: venom.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  create-release:
+    name: Create Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+      - name: Generate changelog
+        id: changelog
+        run: |
+          git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:"%h %s" > CHANGELOG_TEMP.txt
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat CHANGELOG_TEMP.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            x86_64-unknown-linux-gnu/venom
+            x86_64-apple-darwin/venom
+            aarch64-apple-darwin/venom
+            x86_64-pc-windows-msvc/venom.exe
+          body: ${{ steps.changelog.outputs.changelog }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: test-before-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_TOKEN }}

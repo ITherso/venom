@@ -354,17 +354,17 @@ mod tests {
     #[test]
     fn test_cleanup_expired_backups() {
         let mut manager = BackupManager::new();
-        let backup = BackupJob::new(
+        let mut backup = BackupJob::new(
             "Test".to_string(),
             BackupType::Full,
             "/backup/test".to_string(),
-            1,
+            0,
         );
+        backup.start_time = Utc::now() - Duration::days(1);
         let backup_id = backup.id.clone();
         manager.backups.insert(backup_id, backup);
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
         let count = manager.cleanup_expired_backups();
-        assert!(count > 0);
+        assert_eq!(count, 1);
     }
 }

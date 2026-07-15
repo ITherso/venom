@@ -274,7 +274,8 @@ mod tests {
     #[test]
     fn test_sql_injection_detection() {
         let validator = InputValidator::new();
-        assert!(validator.contains_sql_injection("SELECT * FROM users"));
+        assert!(validator.contains_sql_injection("id=1 OR 1=1"));
+        assert!(validator.contains_sql_injection("id=1 UNION SELECT username FROM users"));
         assert!(!validator.contains_sql_injection("normal text"));
     }
 

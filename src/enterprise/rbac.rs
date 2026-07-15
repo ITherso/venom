@@ -337,8 +337,8 @@ mod tests {
     fn test_create_subject_and_assign_role() {
         let mut manager = RBACManager::new();
         let subject_id = manager.create_subject("testuser".to_string(), SubjectType::User);
-        let role = manager.get_role_by_name("Operator").unwrap();
-        manager.assign_role(&subject_id, &role.id);
+        let role_id = manager.get_role_by_name("Operator").map(|r| r.id.clone()).unwrap();
+        manager.assign_role(&subject_id, &role_id);
 
         assert!(manager.has_permission(&subject_id, &Permission::Read));
     }
@@ -347,8 +347,8 @@ mod tests {
     fn test_permission_check() {
         let mut manager = RBACManager::new();
         let subject_id = manager.create_subject("testuser".to_string(), SubjectType::User);
-        let admin_role = manager.get_role_by_name("Admin").unwrap();
-        manager.assign_role(&subject_id, &admin_role.id);
+        let admin_role_id = manager.get_role_by_name("Admin").map(|r| r.id.clone()).unwrap();
+        manager.assign_role(&subject_id, &admin_role_id);
 
         assert!(manager.has_permission(&subject_id, &Permission::Admin));
     }
