@@ -29,6 +29,7 @@ pub mod monitoring;
 pub mod persistence;
 pub mod phases;
 pub mod plugin;
+pub mod post_exploitation;
 pub mod realtime;
 pub mod reporting;
 pub mod runner;
@@ -54,6 +55,7 @@ pub use ml::{PatternLearner, VulnerabilityPattern, ClusterResult, ExploitBuilder
 pub use monitoring::{PhaseProfile, ResourceMetrics, ScanProfile, PerformanceAnalyzer, OptimizationRecommendation, RecommendationCategory, BenchmarkSuite, BenchmarkResult, ScanComparison};
 pub use persistence::{DbConfig, EntityType, ScanRecord, FindingRecord, EndpointRecord, QueryBuilder, SchemaManager, TableSchema, ColumnDef, IndexDef, ConnectionPool, TransactionManager, Transaction, TransactionStatus, QueryResult};
 pub use plugin::{ScannerPlugin, PluginRegistry, PluginInfo};
+pub use post_exploitation::{PayloadType, ReverseShell, Webshell, PersistenceMechanism, PersistenceTechnique, ExploitPayload, PostExploitSession, PrivilegeLevel, LateralTarget, PostExploitationManager};
 pub use realtime::{RealtimeEvent, EventStream, ConnectionManager, Subscription};
 pub use reporting::{VulnerabilityReport, ReportGenerator, ReportFormat};
 pub use runner::ScanRunner;
