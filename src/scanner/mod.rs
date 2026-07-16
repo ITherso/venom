@@ -13,6 +13,9 @@ pub mod xss_payloads;
 pub mod ssti_expert;
 pub mod idor_detector;
 pub mod ssrf_detector;
+pub mod anomaly_detector;
+pub mod threat_intelligence;
+pub mod behavioral_analyzer;
 pub mod parallel;
 pub mod scoring;
 
