@@ -24,6 +24,8 @@ pub mod error_handling;
 pub mod ml_detection;
 pub mod api_scanner;
 pub mod endpoint_fuzzer;
+pub mod deserialization;
+pub mod gadget_analyzer;
 pub mod parallel;
 pub mod scoring;
 
