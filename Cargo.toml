@@ -1,9 +1,21 @@
-[package]
-name = "venom"
+[workspace]
+members = [
+    "crates/venom-core",
+    "crates/venom-proxy",
+    "crates/venom-scanner",
+    "crates/venom-api",
+    "crates/venom-cli",
+]
+resolver = "2"
+
+[workspace.package]
 version = "1.0.0"
 edition = "2021"
+authors = ["ITherso <e268792@metu.edu.tr>"]
+license = "MIT"
+repository = "https://github.com/ITherso/venom"
 
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 http = "1"
@@ -16,7 +28,6 @@ rcgen = "0.12"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
@@ -40,6 +51,7 @@ sha2 = "0.10"
 html-escape = "0.2"
 tempfile = "3.8"
 memmap2 = "0.9"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 
 [profile.release]
 opt-level = 3

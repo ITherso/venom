@@ -1,0 +1,21 @@
+[package]
+name = "venom-scanner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+venom-core = { path = "../venom-core" }
+reqwest = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+memmap2 = { workspace = true }
+nom = { workspace = true }
+
+[lib]
+name = "venom_scanner"
+path = "src/lib.rs"

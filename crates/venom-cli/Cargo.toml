@@ -1,0 +1,22 @@
+[package]
+name = "venom-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "venom"
+path = "src/main.rs"
+
+[dependencies]
+venom-core = { path = "../venom-core" }
+venom-scanner = { path = "../venom-scanner" }
+venom-api = { path = "../venom-api" }
+venom-proxy = { path = "../venom-proxy" }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

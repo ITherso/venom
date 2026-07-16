@@ -1,0 +1,22 @@
+[package]
+name = "venom-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+venom-core = { path = "../venom-core" }
+venom-scanner = { path = "../venom-scanner" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[lib]
+name = "venom_api"
+path = "src/lib.rs"
