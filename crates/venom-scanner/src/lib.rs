@@ -1,11 +1,23 @@
 // VENOM Scanner - Professional multi-phase vulnerability scanner
+//!
+//! A sophisticated, multi-phase vulnerability detection and exploitation framework
+//! built in Rust for maximum performance and safety.
+//!
+//! ## Architecture
+//! - **10 Phases**: Sequential vulnerability detection across different categories
+//! - **Async/Await**: Native Tokio-based concurrency for high-throughput scanning
+//! - **Zero-Copy**: DashMap for efficient, lock-free inter-phase communication
+//! - **Type-Safe**: Compile-time guarantees eliminate entire classes of bugs
+
 pub mod context;
 pub mod error;
+pub mod logging;
 pub mod phases;
 pub mod runner;
 
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
+pub use logging::{LogEntry, LogLevel, Logger};
 pub use runner::ScanRunner;
 
 use async_trait::async_trait;
