@@ -13,6 +13,7 @@ pub mod adaptive;
 pub mod advanced_detection;
 pub mod anomaly;
 pub mod api;
+pub mod api_gateway;
 pub mod auth;
 pub mod cache;
 pub mod config;
@@ -35,6 +36,7 @@ pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, Payload
 pub use advanced_detection::{BehavioralSignature, BehaviorIndicator, IndicatorType, ComparisonOperator, WafBypassTechnique, BypassCategory, BehavioralAnalyzer, BehavioralAnalysisData, DetectionResult, WafBypassSelector, SignatureEvasionEngine, EversionRule, EversionType};
 pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
 pub use api::{ApiResponse, ScanStatus, ScanStatusType, StartScanRequest, ScanResultResponse, ApiEndpoints, ApiError};
+pub use api_gateway::{RateLimitStrategy, RateLimitPolicy, RateLimitStatus, ApiQuota, RateLimiter, TokenBucket, QuotaManager, RouteConfig, ApiGateway, RequestValidationResult};
 pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, LoginResponse};
 pub use cache::{LruCache, CacheEntry, ResponseCache, CacheStats};
 pub use config::{ScanConfig, ScanIntensity};
