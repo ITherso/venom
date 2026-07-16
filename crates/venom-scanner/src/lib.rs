@@ -32,6 +32,7 @@ pub mod plugin;
 pub mod realtime;
 pub mod reporting;
 pub mod runner;
+pub mod threat_intelligence;
 pub mod waf;
 
 pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
@@ -56,6 +57,7 @@ pub use plugin::{ScannerPlugin, PluginRegistry, PluginInfo};
 pub use realtime::{RealtimeEvent, EventStream, ConnectionManager, Subscription};
 pub use reporting::{VulnerabilityReport, ReportGenerator, ReportFormat};
 pub use runner::ScanRunner;
+pub use threat_intelligence::{ThreatFeedSource, CVERecord, ThreatFeedEntry, ThreatSeverity, CVECorrelator, ThreatFeedManager, AlertRule, AlertAction, AlertEngine, SecurityAlert, ThreatActorProfile, ThreatIntelligenceRepo};
 pub use waf::{WafDetector, WafProduct, PayloadEncoder, EvisionTechnique};
 
 use async_trait::async_trait;
