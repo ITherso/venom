@@ -11,6 +11,7 @@
 
 pub mod adaptive;
 pub mod anomaly;
+pub mod config;
 pub mod context;
 pub mod error;
 pub mod logging;
@@ -22,6 +23,7 @@ pub mod waf;
 
 pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
 pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
+pub use config::{ScanConfig, ScanIntensity};
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
