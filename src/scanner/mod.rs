@@ -31,6 +31,7 @@ pub mod parallel;
 pub mod scoring;
 pub mod business_logic_fuzzer;
 pub mod oauth_jwt_breaker;
+pub mod source_code_analyzer;
 
 use crate::Result;
 use crate::proxy::http_parser::HttpRequest;
