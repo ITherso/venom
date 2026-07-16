@@ -22,6 +22,8 @@ pub mod performance_benchmark;
 pub mod release_config;
 pub mod error_handling;
 pub mod ml_detection;
+pub mod api_scanner;
+pub mod endpoint_fuzzer;
 pub mod parallel;
 pub mod scoring;
 
