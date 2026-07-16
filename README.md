@@ -7,9 +7,9 @@
 
 > **VENOM v1.0.0** — Complete enterprise-grade pentesting platform. MITM proxy + scanner + zero-day engine + post-exploitation + CLI + Web Dashboard + Performance Optimization + Security Hardening + Compliance & Reporting.
 
-**Status:** v1.0.0 PRODUCTION | All Phases Complete | 10,572 Lines Rust Scanner | 434+ Tests | 24 Modules | Enterprise-Ready
+**Status:** v1.0.0 PRODUCTION | All Phases Complete | 11,360 Lines Rust Scanner | 462+ Tests | 25 Modules | Enterprise-Ready
 
-**TIER 1-13 ✅ COMPLETE** — Compliance-Ready Enterprise Platform
+**TIER 1-14 ✅ COMPLETE** — Full Intelligence-Driven Platform
 
 **TIER 7: Distributed Scaling ✅ COMPLETE (530 lines, 16 tests):**
 - ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), capacity-based scheduling
@@ -261,7 +261,27 @@ cargo build --release
 - Multi-scan comparison and analysis
 - Percentile-based performance tracking
 
-### ✅ TIER 13: Compliance & Automated Reporting (NEW)
+### ✅ TIER 14: Threat Intelligence & Security Alerts (NEW)
+| Feature | Status | Details |
+|---------|--------|---------|
+| **CVE Correlation** | ✅ | NVD, CISA, ExploitDB data integration |
+| **Threat Feeds** | ✅ | Multi-source feed aggregation, IOC tracking |
+| **Alert Rules** | ✅ | Condition-based triggering, 5 response types |
+| **Severity Scoring** | ✅ | 4-level threat classification, CVSS integration |
+| **Threat Actors** | ✅ | APT profile tracking, technique mapping |
+| **Automated Response** | ✅ | Notify/Isolate/Block/Escalate/Report actions |
+
+**Intelligence-Driven Security:**
+- 5 threat feed sources (NVD/CISA/ExploitDB/MITRE/Custom)
+- CVE database with exploitability detection
+- Multi-source threat feed aggregation
+- 4-level severity classification (Low→Critical)
+- 5 automated response actions per alert
+- Threat actor profiling (techniques, infrastructure)
+- Indicators of Compromise (IOC) tracking
+- Real-time threat monitoring & trending
+
+### ✅ TIER 13: Compliance & Automated Reporting
 | Feature | Status | Details |
 |---------|--------|---------|
 | **Audit Logging** | ✅ | 8 event types, per-user/time-range filtering |
@@ -567,13 +587,13 @@ venom/
 
 **Stats:**
 - **Language:** Rust (2021 edition) + React/TypeScript
-- **Total Lines of Code:** 18,700+ lines
-  - Backend (Rust): 15,700+ lines (scanner + 13 TIERs complete)
+- **Total Lines of Code:** 19,500+ lines
+  - Backend (Rust): 16,500+ lines (scanner + 14 TIERs complete)
   - Frontend (React/TypeScript): 3,000+ lines
-- **Total Test Cases:** 434+ comprehensive tests (100% passing)
-  - Unit tests: 167 tests (all core modules)
-  - Integration tests: 267 tests (TIER 7-13 + phases)
-- **Modules:** 24 core scanner modules + 30+ platform modules
+- **Total Test Cases:** 462+ comprehensive tests (100% passing)
+  - Unit tests: 175 tests (all core modules)
+  - Integration tests: 287 tests (TIER 7-14 + phases)
+- **Modules:** 25 core scanner modules + 32+ platform modules
 - **CLI Commands:** 40+
 - **Concurrent Workers:** 
   - Single node: 100+ concurrent requests (Tokio async)
@@ -583,13 +603,14 @@ venom/
 - **CVSS Compliance:** v3.1 full implementation
 - **Rate Limiting:** 4 algorithms (TokenBucket, SlidingWindow, FixedWindow, LeakyBucket)
 - **Compliance Frameworks:** GDPR, HIPAA, SOC2, PCI-DSS
-- **Audit Events:** 8 types with per-user filtering
+- **Threat Intelligence:** 5 feed sources (NVD/CISA/ExploitDB/MITRE/Custom)
+- **Alert Response Types:** 5 actions (Notify/Isolate/Block/Escalate/Report)
 - **Database:** SQLite with connection pooling, WAL, transaction support
-- **Build Time:** 54s (release, optimized)
-- **Binary Size:** 13-16 MB (stripped)
+- **Build Time:** 57s (release, optimized)
+- **Binary Size:** 14-17 MB (stripped)
 - **Dependencies:** 45+ (lean, battle-tested)
 - **Production Ready:** ✅ Yes (v1.0.0)
-- **Enterprise Features:** RBAC, API gateway, rate limiting, database persistence, compliance auditing, GDPR/HIPAA/SOC2, dashboards, ML, distributed, monitoring
+- **Enterprise Features:** RBAC, API gateway, rate limiting, database persistence, threat intelligence, CVE correlation, compliance auditing, alerting, GDPR/HIPAA/SOC2, dashboards, ML, distributed, monitoring
 
 ---
 
