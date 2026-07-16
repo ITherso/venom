@@ -13,6 +13,7 @@ pub mod adaptive;
 pub mod anomaly;
 pub mod api;
 pub mod auth;
+pub mod cache;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -29,6 +30,7 @@ pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, Payload
 pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
 pub use api::{ApiResponse, ScanStatus, ScanStatusType, StartScanRequest, ScanResultResponse, ApiEndpoints, ApiError};
 pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, LoginResponse};
+pub use cache::{LruCache, CacheEntry, ResponseCache, CacheStats};
 pub use config::{ScanConfig, ScanIntensity};
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
