@@ -1,47 +1,100 @@
-use crate::{ScanFinding, ScanPhase, context::ScanContext};
-use std::sync::Arc;
+//! Scan pipeline orchestration with phase execution and finding aggregation
+//!
+//! The ScanRunner coordinates sequential execution of all 9 scanning phases,
+//! manages error handling, and aggregates findings with timing metrics.
 
+use crate::{ScanFinding, ScanPhase, context::ScanContext, LogEntry, LogLevel};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Orchestrates multi-phase scanning pipeline
+///
+/// - Maintains phase registry in execution order
+/// - Tracks timing for performance metrics
+/// - Aggregates findings from all phases
+/// - Handles phase-level errors gracefully
 pub struct ScanRunner {
     phases: Vec<Box<dyn ScanPhase>>,
 }
 
 impl ScanRunner {
+    /// Creates a new empty runner
     pub fn new() -> Self {
         Self { phases: Vec::new() }
     }
 
+    /// Registers a phase for execution
+    ///
+    /// Automatically maintains phases in order by phase_number()
     pub fn register_phase(&mut self, phase: Box<dyn ScanPhase>) {
         self.phases.push(phase);
         // Sort by phase number to ensure proper execution order
         self.phases.sort_by_key(|p| p.phase_number());
     }
 
+    /// Executes all registered phases sequentially
+    ///
+    /// # Process
+    /// 1. For each phase (in order):
+    ///    - Log phase start with structured logging
+    ///    - Execute phase with timeout
+    ///    - Log completion with timing metrics
+    ///    - Aggregate findings
+    /// 2. Return combined findings from all phases
+    ///
+    /// # Error Handling
+    /// Phase errors are logged but don't halt pipeline. Returns partial results.
     pub async fn run_pipeline(&self, ctx: ScanContext) -> Vec<ScanFinding> {
         let mut all_findings = Vec::new();
         let ctx_arc = Arc::new(ctx);
 
         for phase in &self.phases {
-            ctx_arc.log(format!(
-                "[*] Executing Phase {} - {}",
-                phase.phase_number(),
-                phase.name()
-            ));
+            let phase_num = phase.phase_number();
+            let phase_name = phase.name();
+            let start = Instant::now();
 
+            // Log structured phase start
+            let start_entry = LogEntry::new(
+                LogLevel::Info,
+                format!("Starting Phase {}: {}", phase_num, phase_name),
+            )
+            .with_phase(phase_num);
+            ctx_arc.logger.log(start_entry);
+            ctx_arc.log(format!("[*] Phase {}: {}", phase_num, phase_name));
+
+            // Execute phase with implicit timeout from HTTP client config
             match phase.execute(&ctx_arc).await {
                 Ok(findings) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let finding_count = findings.len();
+
+                    // Log structured completion
+                    let complete_entry = LogEntry::new(
+                        LogLevel::Info,
+                        format!("Phase {} completed: {} findings", phase_num, finding_count),
+                    )
+                    .with_phase(phase_num)
+                    .with_duration(elapsed);
+                    ctx_arc.logger.log(complete_entry);
                     ctx_arc.log(format!(
-                        "[+] Phase {} completed successfully. Findings: {}",
-                        phase.phase_number(),
-                        findings.len()
+                        "[+] Phase {} complete: {} findings in {}ms",
+                        phase_num, finding_count, elapsed
                     ));
+
                     all_findings.extend(findings);
                 }
                 Err(e) => {
-                    ctx_arc.log(format!(
-                        "[-] Phase {} failed: {:?}",
-                        phase.phase_number(),
-                        e
-                    ));
+                    let elapsed = start.elapsed().as_millis() as u64;
+
+                    // Log error with context
+                    let error_entry = LogEntry::new(
+                        LogLevel::Error,
+                        format!("Phase {} failed: {}", phase_num, e),
+                    )
+                    .with_phase(phase_num)
+                    .with_duration(elapsed);
+                    ctx_arc.logger.log(error_entry);
+                    ctx_arc.log(format!("[-] Phase {} error: {:?}", phase_num, e));
                 }
             }
         }
