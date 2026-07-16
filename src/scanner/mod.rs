@@ -21,6 +21,7 @@ pub mod test_fixtures;
 pub mod performance_benchmark;
 pub mod release_config;
 pub mod error_handling;
+pub mod ml_detection;
 pub mod parallel;
 pub mod scoring;
 
