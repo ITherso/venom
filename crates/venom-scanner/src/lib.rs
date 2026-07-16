@@ -16,6 +16,7 @@ pub mod api;
 pub mod api_gateway;
 pub mod auth;
 pub mod cache;
+pub mod compliance;
 pub mod config;
 pub mod context;
 pub mod dashboard;
@@ -40,6 +41,7 @@ pub use api::{ApiResponse, ScanStatus, ScanStatusType, StartScanRequest, ScanRes
 pub use api_gateway::{RateLimitStrategy, RateLimitPolicy, RateLimitStatus, ApiQuota, RateLimiter, TokenBucket, QuotaManager, RouteConfig, ApiGateway, RequestValidationResult};
 pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, LoginResponse};
 pub use cache::{LruCache, CacheEntry, ResponseCache, CacheStats};
+pub use compliance::{ComplianceFramework, ComplianceRequirement, AuditEventType, AuditLogEntry, AuditLogger, ComplianceAssessment, ComplianceAssessor, DataProtectionRecord, DataClassification, DataProtectionManager, ComplianceReport, ComplianceReporter};
 pub use config::{ScanConfig, ScanIntensity};
 pub use context::ScanContext;
 pub use dashboard::{DashboardOverview, DashboardService, DashboardConfig, ScanCard, FindingCard, FindingStatus, WidgetType};
