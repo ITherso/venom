@@ -16,6 +16,9 @@ pub mod ssrf_detector;
 pub mod anomaly_detector;
 pub mod threat_intelligence;
 pub mod behavioral_analyzer;
+pub mod integration_tests;
+pub mod test_fixtures;
+pub mod performance_benchmark;
 pub mod parallel;
 pub mod scoring;
 
