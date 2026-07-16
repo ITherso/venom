@@ -11,6 +11,8 @@ pub mod xss_expert;
 pub mod xss_advanced;
 pub mod xss_payloads;
 pub mod ssti_expert;
+pub mod idor_detector;
+pub mod ssrf_detector;
 pub mod parallel;
 pub mod scoring;
 
