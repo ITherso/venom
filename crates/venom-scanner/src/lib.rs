@@ -10,6 +10,7 @@
 //! - **Type-Safe**: Compile-time guarantees eliminate entire classes of bugs
 
 pub mod adaptive;
+pub mod advanced_detection;
 pub mod anomaly;
 pub mod api;
 pub mod auth;
@@ -31,6 +32,7 @@ pub mod runner;
 pub mod waf;
 
 pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
+pub use advanced_detection::{BehavioralSignature, BehaviorIndicator, IndicatorType, ComparisonOperator, WafBypassTechnique, BypassCategory, BehavioralAnalyzer, BehavioralAnalysisData, DetectionResult, WafBypassSelector, SignatureEvasionEngine, EversionRule, EversionType};
 pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
 pub use api::{ApiResponse, ScanStatus, ScanStatusType, StartScanRequest, ScanResultResponse, ApiEndpoints, ApiError};
 pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, LoginResponse};
