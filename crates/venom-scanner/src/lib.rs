@@ -16,6 +16,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod context;
+pub mod dashboard;
 pub mod error;
 pub mod logging;
 pub mod metrics;
@@ -33,6 +34,7 @@ pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, L
 pub use cache::{LruCache, CacheEntry, ResponseCache, CacheStats};
 pub use config::{ScanConfig, ScanIntensity};
 pub use context::ScanContext;
+pub use dashboard::{DashboardOverview, DashboardService, DashboardConfig, ScanCard, FindingCard, FindingStatus, WidgetType};
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
 pub use metrics::{MetricsCollector, MetricsSummary, PhaseMetrics};
