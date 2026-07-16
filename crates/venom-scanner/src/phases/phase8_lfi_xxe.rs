@@ -1,8 +1,25 @@
+//! # Phase 8: Local File Inclusion & XML External Entity
+//!
+//! Comprehensive LFI and XXE detection with both in-band and out-of-band techniques.
+//! OS-aware payloads for Linux/Windows; blind XXE callback tracking.
+//!
+//! ## LFI Payloads
+//! - Linux: `/etc/passwd`, `../../../etc/shadow`, URL-encoded variants
+//! - Windows: `C:\windows\win.ini`, `system32/drivers/etc/hosts`
+//! - File signatures: `root:x:0:0:`, `[fonts]`, `localhost`
+//!
+//! ## XXE Detection
+//! - **In-Band**: Direct entity expansion in response body
+//! - **Blind OOB**: DNS/HTTP callback verification with UUID tracking
+//! - Supports external OOB domain configuration
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use url::Url;
 
+/// LFI & XXE scanner with in-band and blind OOB detection
+#[derive(Debug)]
 pub struct LfiXxeScanner {
     oob_domain: Option<String>,
 }

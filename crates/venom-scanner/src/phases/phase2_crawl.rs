@@ -1,8 +1,29 @@
+//! # Phase 2: Web Crawler & Parameter Discovery
+//!
+//! Automatically discovers endpoints and parameters through recursive web crawling
+//! and form analysis. Populates ScanContext with discovered_endpoints for downstream phases.
+//!
+//! ## Features
+//! - **Recursive Crawling**: Follows internal links while respecting scope
+//! - **Parameter Discovery**: Extracts form inputs and query parameters
+//! - **URL Normalization**: Eliminates duplicate endpoints
+//! - **Same-Origin Validation**: Prevents scope creep to external hosts
+//!
+//! ## Performance
+//! - Timeout: 5 seconds per URL
+//! - Concurrent crawls with Tokio
+//! - Visited URL deduplication with DashSet
+//!
+//! ## Output
+//! Populates `ctx.discovered_endpoints` map: URL → [param1, param2, ...]
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use regex::Regex;
 use url::Url;
 
+/// Web crawling phase for endpoint and parameter discovery
+#[derive(Debug)]
 pub struct CrawlPhase;
 
 #[async_trait]

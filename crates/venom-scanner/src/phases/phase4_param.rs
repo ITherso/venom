@@ -1,9 +1,25 @@
+//! # Phase 4: Parameter Discovery & Injection Testing
+//!
+//! Discovers hidden parameters using marker-based injection and HTTP status analysis.
+//! Tests 40+ common parameter names to identify injectable inputs.
+//!
+//! ## Wordlist
+//! - id, user_id, admin, debug, api_key, token, password, email, username
+//! - redirect, url, profile, template, data, key, value, and more
+//!
+//! ## Detection Method
+//! - Injects marker value (e.g., "venom_7b3a9c2e_test")
+//! - HTTP 400 = parameter recognized but invalid
+//! - Marker not found = parameter doesn't exist
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+/// Parameter discovery with marker-based injection detection
+#[derive(Debug)]
 pub struct ParameterDiscoverer {
     param_wordlist: Vec<String>,
     concurrency_limit: usize,

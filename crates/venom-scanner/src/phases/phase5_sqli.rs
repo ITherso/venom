@@ -1,8 +1,26 @@
+//! # Phase 5: SQL Injection Detection
+//!
+//! Multi-technique SQLi detection: error-based, boolean-based, and time-based blind attacks.
+//! Fingerprints DBMS via error messages and crafts database-specific payloads.
+//!
+//! ## Detection Methods
+//! - **Error-Based**: SQL error signatures (mysql_fetch, pg_query, ORA-, etc.)
+//! - **Boolean-Based**: AND/OR logic with response comparison
+//! - **Time-Based Blind**: SLEEP(5) with elapsed time measurement
+//!
+//! ## DBMS Detection
+//! - MySQL (mysql_fetch, mysql_error)
+//! - PostgreSQL (PostgreSQL query, pg_)
+//! - Oracle (ORA-, Oracle error)
+//! - MSSQL (SQL Server, Msg)
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use url::Url;
 
+/// SQL injection scanner with multi-technique detection
+#[derive(Debug)]
 pub struct SqliScanner;
 
 #[async_trait]

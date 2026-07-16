@@ -2,6 +2,7 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use url::Url;
+use crate::logging::{Logger, LogLevel};
 
 /// Zero-copy shared state across all scan phases
 #[derive(Clone)]
@@ -14,6 +15,8 @@ pub struct ScanContext {
     pub visited_urls: Arc<DashSet<String>>,
     // Async telemetry channel for logging and analysis
     pub telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    // Structured logger with filtering and formatting
+    pub logger: Arc<Logger>,
 }
 
 impl ScanContext {
@@ -28,6 +31,7 @@ impl ScanContext {
             discovered_endpoints: Arc::new(DashMap::new()),
             visited_urls: Arc::new(DashSet::new()),
             telemetry_tx,
+            logger: Arc::new(Logger::new(LogLevel::Info)),
         }
     }
 

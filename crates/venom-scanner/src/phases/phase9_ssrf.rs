@@ -1,9 +1,31 @@
+//! # Phase 9: Server-Side Request Forgery Detection
+//!
+//! Detects SSRF via local endpoint access and cloud metadata service probing.
+//! Identifies AWS/GCP metadata access with out-of-band callback verification.
+//!
+//! ## Local Payloads
+//! - Loopback: 127.0.0.1, localhost, [::1]
+//! - Link-Local: 169.254.169.254 (AWS metadata)
+//! - Internal: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+//!
+//! ## Cloud Detection
+//! - AWS: ami-id, instance-id, AKIA prefix in responses
+//! - GCP: google-cloud-account, service-accounts, compute metadata
+//! - Azure: identity, imds endpoints
+//!
+//! ## OOB Infrastructure
+//! - UUID-based callback tracking
+//! - HTTP/DNS response logging
+//! - Optional external OOB domain
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use url::Url;
 use uuid::Uuid;
 
+/// SSRF scanner with local and cloud metadata detection
+#[derive(Debug)]
 pub struct SsrfScanner {
     oob_domain: Option<String>,
 }

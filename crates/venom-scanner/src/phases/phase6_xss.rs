@@ -1,8 +1,25 @@
+//! # Phase 6: Reflected XSS Detection
+//!
+//! Analyzes HTML context to generate context-aware XSS payloads.
+//! Detects reflection points and crafts escapes for each context.
+//!
+//! ## Context Detection
+//! - **HtmlTag**: `<div>[REFLECTED]</div>` → `<svg/onload=alert(1)>`
+//! - **DoubleQuoteAttr**: `<input value="[REFLECTED]">` → `\"><svg...`
+//! - **SingleQuoteAttr**: `<input value='[REFLECTED]'>` → `'><svg...`
+//! - **ScriptBlock**: `<script>var x = '[REFLECTED]';</script>` → `';alert(1);//`
+//!
+//! ## Payloads
+//! - Event handlers: onload, onerror, onmouseover
+//! - Data URIs: javascript: protocol
+//! - SVG vectors: <svg> with event attributes
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use url::Url;
 
+/// XSS scanner with HTML context-aware payload generation
 #[derive(Debug, Clone, PartialEq)]
 enum HtmlContext {
     HtmlTag,         // <div>[REFLECTED]</div>

@@ -1,8 +1,26 @@
+//! # Phase 7: Server-Side Template Injection (SSTI)
+//!
+//! Detects and exploits SSTI vulnerabilities with automatic template engine identification.
+//! Generates engine-specific sandbox escapes for RCE chains.
+//!
+//! ## Diagnostic Payloads
+//! - `{{7*7}}` → 49 (Jinja2, Twig, Mako, Tornado)
+//! - `{{7*'7'}}` → 7777777 (Jinja2-specific string multiplication)
+//! - Differentiates between template engines via response analysis
+//!
+//! ## Exploitation
+//! - Jinja2: `__class__.__mro__[2].__subclasses__()[40]('/etc/passwd')`
+//! - Twig: `registerUndefinedFilterCallback('system')`
+//! - Mako: `sys.modules['os'].system('id')`
+//! - FreeMarker: `freemarker.template.utility.Execute`
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use url::Url;
 
+/// SSTI detection with template engine identification and exploitation
+#[derive(Debug)]
 pub struct SstiScanner;
 
 #[derive(Debug, Clone, PartialEq)]

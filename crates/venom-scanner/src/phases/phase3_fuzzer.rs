@@ -1,9 +1,25 @@
+//! # Phase 3: Directory Fuzzing & Discovery
+//!
+//! Brute-forces common directories and endpoints using wordlist fuzzing
+//! with semaphore-based rate limiting to avoid WAF triggers.
+//!
+//! ## Wordlist
+//! - `/admin`, `/api/v*`, `/swagger`, `/graphql`, `/.git`, `/.env`
+//! - `/backup`, `/test`, `/config`, `/uploads`, and 40+ more
+//!
+//! ## Detection
+//! - 200 (OK): Valid endpoint
+//! - 3xx (Redirect): Follow with caution
+//! - 401/403: Protected endpoint (still valuable intel)
+
 use crate::{ScanFinding, ScanPhase, context::ScanContext, error::ScannerError};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+/// Directory fuzzer with concurrent requests and rate limiting
+#[derive(Debug)]
 pub struct DirectoryFuzzer {
     wordlist: Vec<String>,
     concurrency_limit: usize,
