@@ -43,6 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut runner = ScanRunner::new();
             runner.register_phase(Box::new(phases::ReconPhase));
             runner.register_phase(Box::new(phases::CrawlPhase));
+            runner.register_phase(Box::new(phases::DirectoryFuzzer::with_default_wordlist(20)));
+            runner.register_phase(Box::new(phases::ParameterDiscoverer::with_default_wordlist(20)));
             runner.register_phase(Box::new(phases::SqliScanner));
 
             let scan_task = tokio::spawn(async move {
