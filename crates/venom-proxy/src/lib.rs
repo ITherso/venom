@@ -1,5 +1,7 @@
 // VENOM Proxy - MITM, CA management, TLS interception
-use venom_core::Result;
+pub mod mitm;
+
+pub use mitm::{AsyncMitmProxy, CertCache};
 
 pub struct ProxyServer {
     addr: String,
@@ -12,7 +14,10 @@ impl ProxyServer {
     }
 
     pub async fn start(&self) -> Result<()> {
-        println!("Proxy starting on {}:{}", self.addr, self.port);
-        Ok(())
+        let listen_addr = format!("{}:{}", self.addr, self.port);
+        let proxy = AsyncMitmProxy::new(&listen_addr, "127.0.0.1:80".to_string()).await?;
+        proxy.start().await
     }
 }
+
+type Result<T> = std::io::Result<T>;
