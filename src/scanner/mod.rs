@@ -19,6 +19,8 @@ pub mod behavioral_analyzer;
 pub mod integration_tests;
 pub mod test_fixtures;
 pub mod performance_benchmark;
+pub mod release_config;
+pub mod error_handling;
 pub mod parallel;
 pub mod scoring;
 
