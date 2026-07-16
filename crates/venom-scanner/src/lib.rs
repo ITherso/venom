@@ -9,16 +9,20 @@
 //! - **Zero-Copy**: DashMap for efficient, lock-free inter-phase communication
 //! - **Type-Safe**: Compile-time guarantees eliminate entire classes of bugs
 
+pub mod adaptive;
 pub mod context;
 pub mod error;
 pub mod logging;
 pub mod phases;
 pub mod runner;
+pub mod waf;
 
+pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
 pub use runner::ScanRunner;
+pub use waf::{WafDetector, WafProduct, PayloadEncoder, EvisionTechnique};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
