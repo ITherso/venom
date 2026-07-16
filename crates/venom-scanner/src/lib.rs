@@ -14,6 +14,7 @@ pub mod anomaly;
 pub mod context;
 pub mod error;
 pub mod logging;
+pub mod metrics;
 pub mod phases;
 pub mod reporting;
 pub mod runner;
@@ -24,6 +25,7 @@ pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityCla
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
+pub use metrics::{MetricsCollector, MetricsSummary, PhaseMetrics};
 pub use reporting::{VulnerabilityReport, ReportGenerator, ReportFormat};
 pub use runner::ScanRunner;
 pub use waf::{WafDetector, WafProduct, PayloadEncoder, EvisionTechnique};
