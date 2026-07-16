@@ -34,6 +34,7 @@ pub mod oauth_jwt_breaker;
 pub mod source_code_analyzer;
 pub mod infrastructure_scanner;
 pub mod exploit_automation;
+pub mod osint_reconnaissance;
 
 use crate::Result;
 use crate::proxy::http_parser::HttpRequest;
