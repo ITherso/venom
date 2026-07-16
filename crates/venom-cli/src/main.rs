@@ -47,6 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             runner.register_phase(Box::new(phases::ParameterDiscoverer::with_default_wordlist(20)));
             runner.register_phase(Box::new(phases::SqliScanner));
             runner.register_phase(Box::new(phases::XssScanner));
+            runner.register_phase(Box::new(phases::SstiScanner));
+            runner.register_phase(Box::new(phases::LfiXxeScanner::new()));
             runner.register_phase(Box::new(phases::SsrfScanner::new()));
 
             let scan_task = tokio::spawn(async move {
