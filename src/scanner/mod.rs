@@ -33,6 +33,7 @@ pub mod business_logic_fuzzer;
 pub mod oauth_jwt_breaker;
 pub mod source_code_analyzer;
 pub mod infrastructure_scanner;
+pub mod exploit_automation;
 
 use crate::Result;
 use crate::proxy::http_parser::HttpRequest;
