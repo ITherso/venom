@@ -10,6 +10,7 @@
 //! - **Type-Safe**: Compile-time guarantees eliminate entire classes of bugs
 
 pub mod adaptive;
+pub mod anomaly;
 pub mod context;
 pub mod error;
 pub mod logging;
@@ -18,6 +19,7 @@ pub mod runner;
 pub mod waf;
 
 pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
+pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
 pub use context::ScanContext;
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
