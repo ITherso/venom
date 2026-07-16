@@ -7,9 +7,13 @@ license.workspace = true
 
 [dependencies]
 venom-core = { path = "../venom-core" }
-reqwest = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["json", "cookies"] }
+async-trait = "0.1"
+dashmap = "5.5"
+url = "2.5"
 regex = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

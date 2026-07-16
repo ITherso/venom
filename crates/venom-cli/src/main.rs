@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
-use venom_scanner::Scanner;
+use venom_scanner::{ScanRunner, ScanContext, phases};
 use venom_api;
 use venom_proxy::ProxyServer;
+use url::Url;
 
 #[derive(Parser)]
 #[command(name = "venom")]
@@ -33,9 +34,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Some(Commands::Scan { target }) => {
-            let scanner = Scanner::new(target);
-            let _results = scanner.scan().await?;
-            println!("Scan complete");
+            let target_url = Url::parse(&target)?;
+            let client = reqwest::Client::new();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let ctx = ScanContext::new(target_url, client, tx);
+
+            let mut runner = ScanRunner::new();
+            runner.register_phase(Box::new(phases::ReconPhase));
+            runner.register_phase(Box::new(phases::CrawlPhase));
+            runner.register_phase(Box::new(phases::SqliScanner));
+
+            let scan_task = tokio::spawn(async move {
+                runner.run_pipeline(ctx).await
+            });
+
+            let log_task = tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    println!("[LOG] {}", msg);
+                }
+            });
+
+            let findings = scan_task.await.unwrap_or_default();
+            println!("\n[*] Scan completed. Found {} vulnerabilities.", findings.len());
+
+            for finding in findings {
+                println!(
+                    "\n[{}] {} ({})\n  Description: {}\n  Evidence: {}",
+                    finding.severity, finding.description, finding.module_name, finding.description, finding.evidence
+                );
+            }
+
+            let _ = log_task.abort();
         }
         Some(Commands::Api { addr }) => {
             venom_api::start_api(&addr).await?;
