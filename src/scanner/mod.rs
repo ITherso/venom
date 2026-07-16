@@ -26,6 +26,7 @@ pub mod api_scanner;
 pub mod endpoint_fuzzer;
 pub mod deserialization;
 pub mod gadget_analyzer;
+pub mod websocket_scanner;
 pub mod parallel;
 pub mod scoring;
 
