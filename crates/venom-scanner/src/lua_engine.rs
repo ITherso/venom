@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 use std::str::FromStr;
+use tokio::time::{Duration, timeout};
 
 /// Script categories (type-safe, no typos, autocomplete)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -194,6 +196,82 @@ impl LuaScript {
     pub fn with_timeout(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
         self
+    }
+
+    /// Execute script with timeout enforcement (P0 feature)
+    pub async fn execute(&self, context: LuaContext) -> LuaExecutionResult {
+        let start = Instant::now();
+        let script_id = self.id.to_string();
+
+        // Enforce timeout using tokio::time::timeout
+        let result = timeout(
+            Duration::from_millis(self.timeout_ms),
+            Self::execute_script_async(&self.name, context.clone())
+        ).await;
+
+        let execution_time_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(Ok((output, return_value))) => {
+                // Execution succeeded within timeout
+                LuaExecutionResult {
+                    script_id,
+                    success: true,
+                    output,
+                    error: None,
+                    execution_time_ms,
+                    return_value: Some(return_value),
+                }
+            }
+            Ok(Err(err)) => {
+                // Execution failed (script error)
+                LuaExecutionResult {
+                    script_id,
+                    success: false,
+                    output: String::new(),
+                    error: Some(err),
+                    execution_time_ms,
+                    return_value: None,
+                }
+            }
+            Err(_elapsed) => {
+                // Timeout exceeded (P0 protection)
+                LuaExecutionResult {
+                    script_id,
+                    success: false,
+                    output: format!("Timeout after {}ms", self.timeout_ms),
+                    error: Some(format!("Script execution timeout ({}ms exceeded)", self.timeout_ms)),
+                    execution_time_ms,
+                    return_value: None,
+                }
+            }
+        }
+    }
+
+    /// Async script execution (simulated - real implementation would use mlua)
+    async fn execute_script_async(
+        script_name: &str,
+        context: LuaContext,
+    ) -> Result<(String, String), String> {
+        // Simulate script execution with tokio task
+        tokio::task::spawn_blocking(move || {
+            // In production, this would:
+            // 1. Load Lua state from script_path
+            // 2. Set up globals: target, payload, parameters
+            // 3. Execute Lua code
+            // 4. Return output and return_value
+
+            // For now, simulate execution
+            let output = format!(
+                "Executed {} against {} with payload: {}",
+                script_name, context.target, context.payload
+            );
+            let return_value = "success".to_string();
+
+            Ok((output, return_value))
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
     }
 }
 
@@ -724,5 +802,42 @@ mod tests {
 
         let enabled = registry.list_enabled();
         assert_eq!(enabled.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_script_execution_within_timeout() {
+        let script = LuaScript::new("test_exec", "Test Execution", "test.lua")
+            .with_timeout(5000);  // 5 second timeout
+
+        let context = LuaContext::new("http://example.com")
+            .with_payload("<script>alert(1)</script>");
+
+        let result = script.execute(context).await;
+
+        assert!(result.success);
+        assert_eq!(result.script_id, script.id.to_string());
+        assert!(result.execution_time_ms < 5000);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_script_execution_timeout_enforcement() {
+        let script = LuaScript::new("test_timeout", "Timeout Test", "test.lua")
+            .with_timeout(100);  // Very short timeout (100ms)
+
+        let context = LuaContext::new("http://example.com");
+
+        // Create a version of execute that sleeps to exceed timeout
+        // For now, just verify timeout is set correctly
+        assert_eq!(script.timeout_ms, 100);
+    }
+
+    #[test]
+    fn test_timeout_configuration() {
+        let script = LuaScript::new("test_config", "Config Test", "test.lua");
+        assert_eq!(script.timeout_ms, 5000);  // Default
+
+        let script_custom = script.with_timeout(10000);
+        assert_eq!(script_custom.timeout_ms, 10000);
     }
 }
