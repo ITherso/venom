@@ -440,4 +440,161 @@ mod tests {
         agg.store_result("t1", result.clone());
         assert_eq!(agg.get_result("t1"), Some(result));
     }
+
+    #[test]
+    fn test_update_heartbeat() {
+        let pool = WorkerPool::new();
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,  // Old timestamp
+        };
+
+        pool.register_worker(worker);
+
+        // Update heartbeat
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        pool.update_heartbeat("w1");
+
+        // Verify heartbeat was updated
+        let updated_worker = pool.get_workers().into_iter().next().unwrap();
+        assert!(updated_worker.last_heartbeat >= now);
+    }
+
+    #[test]
+    fn test_prune_dead_workers() {
+        let pool = WorkerPool::new();
+
+        // Register 3 workers with stale heartbeat
+        for i in 0..3 {
+            let worker = WorkerNode {
+                worker_id: format!("w{}", i),
+                hostname: format!("scanner-{}", i),
+                address: format!("192.168.1.{}", i + 10),
+                port: 8000,
+                status: WorkerStatus::Healthy,
+                capacity: 10,
+                current_tasks: 0,
+                completed_tasks: 0,
+                last_heartbeat: 1000,  // Very old
+            };
+            pool.register_worker(worker);
+        }
+
+        // All should be Healthy initially
+        assert_eq!(pool.healthy_worker_count(), 3);
+
+        // Prune with 30s timeout (all workers exceeded)
+        let pruned = pool.prune_dead_workers(30);
+        assert_eq!(pruned, 3);
+
+        // All should now be Offline
+        assert_eq!(pool.healthy_worker_count(), 0);
+
+        // Verify all are Offline
+        for worker in pool.get_workers() {
+            assert_eq!(worker.status, WorkerStatus::Offline);
+        }
+    }
+
+    #[test]
+    fn test_prune_preserves_recent_heartbeats() {
+        let pool = WorkerPool::new();
+
+        // Register 2 workers
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let healthy_worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: now,  // Fresh heartbeat
+        };
+
+        let dead_worker = WorkerNode {
+            worker_id: "w2".to_string(),
+            hostname: "scanner-2".to_string(),
+            address: "192.168.1.20".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: now - 100,  // Very old
+        };
+
+        pool.register_worker(healthy_worker);
+        pool.register_worker(dead_worker);
+
+        // Prune with 30s timeout
+        let pruned = pool.prune_dead_workers(30);
+
+        // Only dead worker should be pruned
+        assert_eq!(pruned, 1);
+        assert_eq!(pool.healthy_worker_count(), 1);
+
+        // Verify correct worker marked Offline
+        let workers = pool.get_workers();
+        let w1 = workers.iter().find(|w| w.worker_id == "w1").unwrap();
+        let w2 = workers.iter().find(|w| w.worker_id == "w2").unwrap();
+
+        assert_eq!(w1.status, WorkerStatus::Healthy);
+        assert_eq!(w2.status, WorkerStatus::Offline);
+    }
+
+    #[test]
+    fn test_get_alive_workers() {
+        let pool = WorkerPool::new();
+
+        // Register mix of healthy and offline workers
+        let healthy_worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 9999,
+        };
+
+        let offline_worker = WorkerNode {
+            worker_id: "w2".to_string(),
+            hostname: "scanner-2".to_string(),
+            address: "192.168.1.20".to_string(),
+            port: 8000,
+            status: WorkerStatus::Offline,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+        };
+
+        pool.register_worker(healthy_worker);
+        pool.register_worker(offline_worker);
+
+        let alive = pool.get_alive_workers();
+        assert_eq!(alive.len(), 1);
+        assert_eq!(alive[0].worker_id, "w1");
+        assert_eq!(alive[0].status, WorkerStatus::Healthy);
+    }
 }
