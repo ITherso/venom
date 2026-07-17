@@ -265,20 +265,77 @@ impl LuaScriptStatus {
     }
 }
 
+/// Bounded execution history (keeps last N entries, prevents memory leak)
+#[derive(Debug, Clone)]
+pub struct BoundedExecutionHistory {
+    entries: std::collections::VecDeque<LuaExecutionResult>,
+    max_size: usize,
+}
+
+impl BoundedExecutionHistory {
+    /// Create new bounded history with max size
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(max_size),
+            max_size,
+        }
+    }
+
+    /// Add execution result (removes oldest if at capacity)
+    pub fn push(&mut self, result: LuaExecutionResult) {
+        if self.entries.len() >= self.max_size {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(result);
+    }
+
+    /// Get all entries (oldest first)
+    pub fn all(&self) -> Vec<LuaExecutionResult> {
+        self.entries.iter().cloned().collect()
+    }
+
+    /// Get recent N entries (newest first)
+    pub fn recent(&self, n: usize) -> Vec<LuaExecutionResult> {
+        self.entries
+            .iter()
+            .rev()
+            .take(n)
+            .cloned()
+            .collect()
+    }
+
+    /// Get size
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Lua Script Registry
 pub struct LuaScriptRegistry {
     scripts: Arc<dashmap::DashMap<String, LuaScript>>,
-    execution_history: Arc<dashmap::DashMap<String, Vec<LuaExecutionResult>>>,
+    execution_history: Arc<dashmap::DashMap<String, BoundedExecutionHistory>>,
     enabled_count: Arc<std::sync::atomic::AtomicU32>,
+    max_history_size: usize,
 }
 
 impl LuaScriptRegistry {
-    /// Creates new Lua script registry
+    /// Creates new Lua script registry with bounded execution history (100 entries per script)
     pub fn new() -> Self {
         Self {
             scripts: Arc::new(dashmap::DashMap::new()),
             execution_history: Arc::new(dashmap::DashMap::new()),
             enabled_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            max_history_size: 100,
+        }
+    }
+
+    /// Creates new registry with custom history size limit
+    pub fn with_history_size(max_history_size: usize) -> Self {
+        Self {
+            scripts: Arc::new(dashmap::DashMap::new()),
+            execution_history: Arc::new(dashmap::DashMap::new()),
+            enabled_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            max_history_size,
         }
     }
 
@@ -322,19 +379,31 @@ impl LuaScriptRegistry {
             .collect()
     }
 
-    /// Records execution result
+    /// Records execution result (enforces bounded history size)
     pub fn record_execution(&self, result: LuaExecutionResult) {
-        self.execution_history
-            .entry(result.script_id.clone())
-            .or_insert_with(Vec::new)
-            .push(result);
+        let script_id = result.script_id.clone();
+        if let Some(mut history) = self.execution_history.get_mut(&script_id) {
+            history.push(result);
+        } else {
+            let mut history = BoundedExecutionHistory::new(self.max_history_size);
+            history.push(result);
+            self.execution_history.insert(script_id, history);
+        }
     }
 
-    /// Gets execution history for script
+    /// Gets execution history for script (oldest first)
     pub fn get_history(&self, script_id: &str) -> Vec<LuaExecutionResult> {
         self.execution_history
             .get(script_id)
-            .map(|h| h.clone())
+            .map(|h| h.all())
+            .unwrap_or_default()
+    }
+
+    /// Gets recent N execution results for script (newest first)
+    pub fn get_recent_history(&self, script_id: &str, n: usize) -> Vec<LuaExecutionResult> {
+        self.execution_history
+            .get(script_id)
+            .map(|h| h.recent(n))
             .unwrap_or_default()
     }
 
@@ -536,6 +605,97 @@ mod tests {
 
         let history = registry.get_history("test_5");
         assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_bounded_execution_history_overflow() {
+        let registry = LuaScriptRegistry::with_history_size(10);
+
+        // Add 20 executions to script (max is 10)
+        for i in 0..20 {
+            let result = LuaExecutionResult {
+                script_id: "test_bounded".to_string(),
+                success: true,
+                output: format!("Run {}", i),
+                error: None,
+                execution_time_ms: 100 + i as u64,
+                return_value: Some(format!("output_{}", i)),
+            };
+            registry.record_execution(result);
+        }
+
+        // History should only contain last 10 (oldest 10 removed)
+        let history = registry.get_history("test_bounded");
+        assert_eq!(history.len(), 10);
+
+        // Should be runs 10-19 (oldest 0-9 dropped)
+        assert_eq!(history[0].output, "Run 10");
+        assert_eq!(history[9].output, "Run 19");
+    }
+
+    #[test]
+    fn test_recent_execution_history() {
+        let registry = LuaScriptRegistry::with_history_size(50);
+
+        // Add 20 executions
+        for i in 0..20 {
+            let result = LuaExecutionResult {
+                script_id: "test_recent".to_string(),
+                success: true,
+                output: format!("Run {}", i),
+                error: None,
+                execution_time_ms: 100 + i as u64,
+                return_value: None,
+            };
+            registry.record_execution(result);
+        }
+
+        // Get last 5 (newest first)
+        let recent = registry.get_recent_history("test_recent", 5);
+        assert_eq!(recent.len(), 5);
+        assert_eq!(recent[0].output, "Run 19");  // Newest
+        assert_eq!(recent[4].output, "Run 15");  // 5th newest
+    }
+
+    #[test]
+    fn test_history_per_script_isolated() {
+        let registry = LuaScriptRegistry::with_history_size(5);
+
+        // Add executions for two different scripts
+        for i in 0..10 {
+            let result_a = LuaExecutionResult {
+                script_id: "script_a".to_string(),
+                success: true,
+                output: format!("A-{}", i),
+                error: None,
+                execution_time_ms: 100 + i as u64,
+                return_value: None,
+            };
+            registry.record_execution(result_a);
+
+            let result_b = LuaExecutionResult {
+                script_id: "script_b".to_string(),
+                success: true,
+                output: format!("B-{}", i),
+                error: None,
+                execution_time_ms: 200 + i as u64,
+                return_value: None,
+            };
+            registry.record_execution(result_b);
+        }
+
+        // Each script should have only last 5 (bounded independently)
+        let history_a = registry.get_history("script_a");
+        let history_b = registry.get_history("script_b");
+
+        assert_eq!(history_a.len(), 5);
+        assert_eq!(history_b.len(), 5);
+
+        assert_eq!(history_a[0].output, "A-5");
+        assert_eq!(history_a[4].output, "A-9");
+
+        assert_eq!(history_b[0].output, "B-5");
+        assert_eq!(history_b[4].output, "B-9");
     }
 
     #[test]
