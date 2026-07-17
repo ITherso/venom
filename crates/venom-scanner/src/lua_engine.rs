@@ -230,6 +230,10 @@ impl LuaScript {
     pub async fn execute(&self, context: LuaContext) -> LuaExecutionResult {
         let start = Instant::now();
         let script_id = self.id.to_string();
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         // Enforce timeout using tokio::time::timeout
         let result = timeout(
@@ -249,6 +253,7 @@ impl LuaScript {
                     error: None,
                     execution_time_ms,
                     return_value: Some(return_value),
+                    timestamp_ms,
                 }
             }
             Ok(Err(err)) => {
@@ -260,6 +265,7 @@ impl LuaScript {
                     error: Some(err),
                     execution_time_ms,
                     return_value: None,
+                    timestamp_ms,
                 }
             }
             Err(_elapsed) => {
@@ -271,6 +277,7 @@ impl LuaScript {
                     error: Some(format!("Script execution timeout ({}ms exceeded)", self.timeout_ms)),
                     execution_time_ms,
                     return_value: None,
+                    timestamp_ms,
                 }
             }
         }
@@ -485,6 +492,7 @@ pub struct LuaExecutionResult {
     pub error: Option<String>,
     pub execution_time_ms: u64,
     pub return_value: Option<String>,
+    pub timestamp_ms: u64,  // P0: Timestamp for exponential decay
 }
 
 /// Lua script status
@@ -514,11 +522,16 @@ impl LuaScriptStatus {
     }
 }
 
-/// Bounded execution history (keeps last N entries, prevents memory leak)
+/// Bounded execution history with exponential decay (P0 - not FIFO)
+///
+/// Recent data weighted more heavily than old data.
+/// Formula: weight = alpha ^ ((current_time - entry_time) / half_life)
+/// Example: 9 min old response = 20% weight, current = 80% weight
 #[derive(Debug, Clone)]
 pub struct BoundedExecutionHistory {
     entries: std::collections::VecDeque<LuaExecutionResult>,
     max_size: usize,
+    decay_half_life_ms: u64,  // Half-life for exponential decay (default 5min)
 }
 
 impl BoundedExecutionHistory {
@@ -527,6 +540,16 @@ impl BoundedExecutionHistory {
         Self {
             entries: std::collections::VecDeque::with_capacity(max_size),
             max_size,
+            decay_half_life_ms: 5 * 60 * 1000,  // 5 minutes half-life
+        }
+    }
+
+    /// Create with custom decay half-life (in milliseconds)
+    pub fn with_decay(max_size: usize, half_life_ms: u64) -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(max_size),
+            max_size,
+            decay_half_life_ms: half_life_ms,
         }
     }
 
@@ -551,6 +574,74 @@ impl BoundedExecutionHistory {
             .take(n)
             .cloned()
             .collect()
+    }
+
+    /// Calculate exponential decay weight for an entry (P0 - ML ready)
+    ///
+    /// Formula: weight = 0.5 ^ (age_ms / half_life_ms)
+    ///
+    /// Examples (half_life = 5 min):
+    /// - Age 0 min:     weight = 1.0 (current)
+    /// - Age 2.5 min:   weight = 0.707 (70%)
+    /// - Age 5 min:     weight = 0.5 (50%)
+    /// - Age 10 min:    weight = 0.25 (25%)
+    /// - Age 15 min:    weight = 0.125 (12.5%)
+    pub fn decay_weight(&self, entry: &LuaExecutionResult, current_time_ms: u64) -> f32 {
+        let age_ms = current_time_ms.saturating_sub(entry.timestamp_ms);
+        if age_ms == 0 {
+            return 1.0;
+        }
+
+        let age_ratio = age_ms as f32 / self.decay_half_life_ms as f32;
+        0.5_f32.powf(age_ratio)
+    }
+
+    /// Get success rate with exponential decay (not simple average)
+    ///
+    /// Returns: weighted success count / weighted total count
+    pub fn success_rate_decayed(&self, current_time_ms: u64) -> f32 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+
+        let mut weighted_success = 0.0;
+        let mut weighted_total = 0.0;
+
+        for entry in &self.entries {
+            let weight = self.decay_weight(entry, current_time_ms);
+            weighted_total += weight;
+            if entry.success {
+                weighted_success += weight;
+            }
+        }
+
+        if weighted_total == 0.0 {
+            return 0.0;
+        }
+
+        weighted_success / weighted_total
+    }
+
+    /// Get average execution time with exponential decay
+    pub fn avg_time_decayed(&self, current_time_ms: u64) -> f32 {
+        if self.entries.is_empty() {
+            return 0.0;
+        }
+
+        let mut weighted_time = 0.0;
+        let mut weighted_total = 0.0;
+
+        for entry in &self.entries {
+            let weight = self.decay_weight(entry, current_time_ms);
+            weighted_total += weight;
+            weighted_time += (entry.execution_time_ms as f32) * weight;
+        }
+
+        if weighted_total == 0.0 {
+            return 0.0;
+        }
+
+        weighted_time / weighted_total
     }
 
     /// Get size
@@ -1587,5 +1678,180 @@ mod tests {
 
         // Original metadata unchanged
         assert_eq!(instance.metadata, metadata);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // EXPONENTIAL DECAY TESTS (P0 - not FIFO!)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_exponential_decay_current_has_full_weight() {
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);  // 5min half-life
+        let current_time = 1000000;
+
+        let entry = LuaExecutionResult {
+            script_id: "test".to_string(),
+            success: true,
+            output: "test".to_string(),
+            error: None,
+            execution_time_ms: 100,
+            return_value: None,
+            timestamp_ms: current_time,  // Current time
+        };
+
+        let weight = history.decay_weight(&entry, current_time);
+        assert!((weight - 1.0).abs() < 0.01, "Current entry should have weight ~1.0, got {}", weight);
+    }
+
+    #[test]
+    fn test_exponential_decay_half_life_is_0_5() {
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);  // 5min half-life
+        let current_time = 1000000;
+        let half_life_ago = current_time - (5 * 60 * 1000);  // 5 minutes ago
+
+        let entry = LuaExecutionResult {
+            script_id: "test".to_string(),
+            success: true,
+            output: "test".to_string(),
+            error: None,
+            execution_time_ms: 100,
+            return_value: None,
+            timestamp_ms: half_life_ago,
+        };
+
+        let weight = history.decay_weight(&entry, current_time);
+        assert!((weight - 0.5).abs() < 0.01, "At half-life, weight should be ~0.5, got {}", weight);
+    }
+
+    #[test]
+    fn test_exponential_decay_9_min_is_20_percent() {
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);  // 5min half-life
+        let current_time = 1000000;
+        let nine_min_ago = current_time - (9 * 60 * 1000);
+
+        let entry = LuaExecutionResult {
+            script_id: "test".to_string(),
+            success: true,
+            output: "test".to_string(),
+            error: None,
+            execution_time_ms: 100,
+            return_value: None,
+            timestamp_ms: nine_min_ago,
+        };
+
+        let weight = history.decay_weight(&entry, current_time);
+        // At 9 min with 5 min half-life: 0.5^(9/5) = 0.5^1.8 ≈ 0.287
+        assert!(weight < 0.3, "9 minutes old should be <30%, got {}", weight);
+        assert!(weight > 0.2, "9 minutes old should be >20%, got {}", weight);
+    }
+
+    #[test]
+    fn test_success_rate_decayed_recent_matters_more() {
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
+        let base_time = 1000000;
+
+        // Add 2 old failed executions
+        for i in 0..2 {
+            history.push(LuaExecutionResult {
+                script_id: "test".to_string(),
+                success: false,  // Failed
+                output: "fail".to_string(),
+                error: None,
+                execution_time_ms: 100,
+                return_value: None,
+                timestamp_ms: base_time - (10 * 60 * 1000),  // 10 min ago (very low weight)
+            });
+        }
+
+        // Add 8 recent successful executions
+        for i in 0..8 {
+            history.push(LuaExecutionResult {
+                script_id: "test".to_string(),
+                success: true,  // Success
+                output: "success".to_string(),
+                error: None,
+                execution_time_ms: 50,
+                return_value: None,
+                timestamp_ms: base_time - (1 * 60 * 1000),  // 1 min ago (high weight)
+            });
+        }
+
+        let success_rate = history.success_rate_decayed(base_time);
+
+        // Should be much higher than 0.8 (8/10) because recent successes matter more
+        assert!(success_rate > 0.85, "Recent successes should dominate, got {}", success_rate);
+    }
+
+    #[test]
+    fn test_avg_time_decayed_recent_execution_time_weighted() {
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
+        let base_time = 1000000;
+
+        // Add 1 old fast execution (10ms)
+        history.push(LuaExecutionResult {
+            script_id: "test".to_string(),
+            success: true,
+            output: "fast".to_string(),
+            error: None,
+            execution_time_ms: 10,  // Very fast
+            return_value: None,
+            timestamp_ms: base_time - (10 * 60 * 1000),  // 10 min ago (low weight)
+        });
+
+        // Add 1 recent slow execution (1000ms)
+        history.push(LuaExecutionResult {
+            script_id: "test".to_string(),
+            success: true,
+            output: "slow".to_string(),
+            error: None,
+            execution_time_ms: 1000,  // Very slow
+            return_value: None,
+            timestamp_ms: base_time - (1 * 60 * 1000),  // 1 min ago (high weight)
+        });
+
+        let avg_time = history.avg_time_decayed(base_time);
+
+        // Should be closer to 1000 than 10 because recent data matters more
+        assert!(avg_time > 800.0, "Recent slow execution should dominate, got {}", avg_time);
+    }
+
+    #[test]
+    fn test_fifo_vs_decay_comparison() {
+        // This test shows why decay is better than FIFO
+        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
+        let base_time = 1000000;
+
+        // Scenario: 5 old failures, 5 recent successes
+        for i in 0..5 {
+            history.push(LuaExecutionResult {
+                script_id: "test".to_string(),
+                success: false,
+                output: "fail".to_string(),
+                error: None,
+                execution_time_ms: 100,
+                return_value: None,
+                timestamp_ms: base_time - (20 * 60 * 1000),  // Very old
+            });
+        }
+
+        for i in 0..5 {
+            history.push(LuaExecutionResult {
+                script_id: "test".to_string(),
+                success: true,
+                output: "success".to_string(),
+                error: None,
+                execution_time_ms: 100,
+                return_value: None,
+                timestamp_ms: base_time - (1 * 60 * 1000),  // Recent
+            });
+        }
+
+        let decayed_rate = history.success_rate_decayed(base_time);
+
+        // FIFO (simple average) = 0.5 (5 successes / 10 total)
+        // Decay = ~0.95+ (recent successes weighted much more)
+
+        assert!(decayed_rate > 0.85, "Exponential decay should prioritize recent data");
+        assert!(decayed_rate != 0.5, "Should NOT be simple FIFO (0.5)");
     }
 }
