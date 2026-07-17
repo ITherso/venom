@@ -138,6 +138,128 @@
 
 ---
 
+## 🔒 Production Hardening Roadmap (v1.1.0)
+
+**Critical Refactorings for Distributed Systems Stability:**
+
+### 1. Anomaly Engine Modularization (Split anomaly.rs)
+```
+anomaly/ (350+ lines → 5 focused modules)
+├── rule_engine.rs    (100 lines) — Rule-based detection
+├── heuristics.rs     (100 lines) — Heuristic scoring
+├── detector.rs       (100 lines) — Statistical analysis
+├── statistics.rs     (80 lines) — Scoring algorithms
+└── distributed.rs    (150 lines) — Tokio, concurrency, retries ⚠️ CRITICAL
+```
+
+**Why Critical:** Distributed systems bugs (80%) originate here. Must test:
+- ✅ Timeout enforcement (5s max per worker)
+- ✅ Cancellation safety (CancellationToken)
+- ✅ Panic isolation (one worker fails, others continue)
+- ✅ Retry logic with exponential backoff
+- ✅ JoinHandle resource cleanup (no leaks)
+
+### 2. Lua Engine Sandbox (Security Critical)
+**Requirements:**
+- 🔐 Block `io.*` (file access)
+- 🔐 Block `os.*` (command execution)
+- 🔐 Block `socket.*` (network access)
+- ⏱️ Timeout: 5 seconds max
+- 💾 Memory limit: 50MB
+
+**Tests Required:**
+```rust
+test_file_access_blocked()     // io.open('/etc/passwd') → Error
+test_os_execute_blocked()      // os.execute('rm -rf /') → Error
+test_network_socket_blocked()  // socket.connect(...) → Error
+test_timeout_enforced()        // Infinite loops → Timeout
+```
+
+### 3. Runner Architecture (Loosely Coupled)
+**Current (Tightly Coupled):** Phase1 → Phase2 → Phase3  
+**Target (Loosely Coupled):**
+```
+ScanRunner
+  ↓ (executes phases independently)
+ScanPhase (isolated, async)
+  ↓ (emits events)
+EventBus (scan lifecycle)
+  ↓ (collects metrics)
+MetricsCollector (timing, findings count)
+  ↓ (persists)
+PersistenceLayer (database)
+```
+
+**Benefits:** Easy to test, parallelize, extend. Dependency injection friendly.
+
+### 4. State Machine (Explicit Scan Flow)
+**Enforced State Transitions:**
+```
+Initialized 
+  → Reconnaissance 
+  → Crawling 
+  → Fuzzing 
+  → SQLi/XSS 
+  → ReportGeneration 
+  → Completed
+```
+
+**Benefit:** Illegal transitions caught immediately (not after 30-min scan).
+
+### 5. Comprehensive Phase Testing
+**Per-Phase Test Requirements (8 scenarios):**
+- ✅ Normal flow (happy path)
+- ✅ Timeout (worker exceeds deadline)
+- ✅ Cancellation (mid-flight cancel signal)
+- ✅ Panic isolation (one worker fails, others continue)
+- ✅ Network error (connection fails)
+- ✅ Empty response (0 bytes)
+- ✅ Huge response (100MB+)
+- ✅ Malformed response (corrupted data)
+
+**Current Gap:** 29 tests → Need 48+ tests (6 phases × 8 scenarios)
+
+### 6. Module Sizing Policy
+**Split Files at 300-400 Lines:**
+- ✅ Done: adaptive.rs (341 lines) → 4 modules
+- 🟡 Watch: anomaly.rs (400+ lines) → needs split
+- 🟡 Watch: phases/ (growing) → split by phase number
+- 🟡 Watch: plugins/ (growing) → split by plugin type
+
+**Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
+
+### 7. Config Validation (Enforce at Construction)
+**Pattern: TryFrom with Serde**
+```rust
+#[serde(try_from = "RawConfig")]
+pub struct Config { ... }
+
+impl TryFrom<RawConfig> for Config {
+    fn try_from(raw: RawConfig) -> Result<Self> {
+        let config = Config { ... };
+        config.validate()?;  // ← ENFORCED
+        Ok(config)
+    }
+}
+```
+
+**Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
+
+### 8. Event Envelope Pattern (Future Dashboard)
+**Separate Routing from Content:**
+```rust
+pub struct EventEnvelope {
+    pub id: Uuid,           // Unique event ID
+    pub scan_id: Uuid,      // Which scan (type-safe!)
+    pub timestamp: DateTime<Utc>,  // Proper datetime
+    pub event_type: EventType,     // What happened
+}
+```
+
+**Benefit:** Type-safe queries, efficient indexing, dashboard-ready.
+
+---
+
 ## 🏗️ Architecture Overview (17 TIER Implementation)
 
 | TIER | Component | Focus | Lines | Tests |
