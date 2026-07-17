@@ -1,8 +1,9 @@
-//! Anomaly Detection Engine (P0 - Outlier-resistant statistics + sliding window)
+//! Anomaly Detection Engine (P0 - Outlier-resistant + P1 - Regex error keywords)
 //!
 //! Detects unusual patterns in responses that may indicate vulnerabilities.
 //! Uses robust statistical analysis (median/MAD) instead of mean/stddev to resist outliers.
 //! Uses sliding window (last 100 responses) for performance and relevance.
+//! Supports regex patterns for flexible error keyword detection.
 //!
 //! Why median + MAD (not mean + stddev)?
 //! - One slow response (7000ms) shouldn't break baseline for 99 normal responses (100ms)
@@ -14,6 +15,125 @@
 //! - 5000 responses = 50x slower baseline recalculation than 100 responses
 //! - Bounded memory (max 100 items, not unbounded growth)
 //! - Recent responses more representative (WAF rules may change over time)
+//!
+//! Why regex error patterns (not exact keywords)?
+//! - SQL error: "SQL syntax error" vs "SQL: syntax error" vs "SQLSyntaxError"
+//! - Oracle: "ORA-00942" vs "ORA-01234" (regex: ORA-\d+)
+//! - Warnings: "Warning: unsafe" vs "WARNING: do not use" (regex: [Ww][Aa][Rr][Nn][Ii][Nn][Gg].*)
+
+/// Error keyword matcher with regex support (P1 - Flexible pattern matching)
+///
+/// Supports both exact keywords and regex patterns for error detection.
+/// Examples:
+/// - Keywords: ["error", "failed", "exception"]
+/// - Patterns: ["SQL.*syntax", "ORA-\\d+", "[Ww][Aa][Rr][Nn][Ii][Nn][Gg].*"]
+#[derive(Debug, Clone)]
+pub struct ErrorKeywordMatcher {
+    /// Exact keywords to search for (case-sensitive)
+    keywords: Vec<String>,
+    /// Regex patterns to match (compiled for performance)
+    patterns: Vec<regex::Regex>,
+}
+
+impl ErrorKeywordMatcher {
+    /// Create matcher with keywords only (simple mode)
+    pub fn with_keywords(keywords: Vec<&str>) -> Self {
+        Self {
+            keywords: keywords.into_iter().map(|s| s.to_string()).collect(),
+            patterns: Vec::new(),
+        }
+    }
+
+    /// Create matcher with regex patterns only
+    pub fn with_patterns(patterns: Vec<&str>) -> Result<Self, String> {
+        let compiled: Result<Vec<_>, _> = patterns
+            .iter()
+            .map(|p| regex::Regex::new(p).map_err(|e| e.to_string()))
+            .collect();
+
+        Ok(Self {
+            keywords: Vec::new(),
+            patterns: compiled?,
+        })
+    }
+
+    /// Create matcher with both keywords and patterns (P1 - Flexible)
+    pub fn with_keywords_and_patterns(
+        keywords: Vec<&str>,
+        patterns: Vec<&str>,
+    ) -> Result<Self, String> {
+        let compiled: Result<Vec<_>, _> = patterns
+            .iter()
+            .map(|p| regex::Regex::new(p).map_err(|e| e.to_string()))
+            .collect();
+
+        Ok(Self {
+            keywords: keywords.into_iter().map(|s| s.to_string()).collect(),
+            patterns: compiled?,
+        })
+    }
+
+    /// Check if text contains error keywords or matches patterns (P1 - Production)
+    pub fn contains_error(&self, text: &str) -> bool {
+        // Check exact keywords first (faster)
+        for keyword in &self.keywords {
+            if text.contains(keyword) {
+                return true;
+            }
+        }
+
+        // Check regex patterns (slower but more flexible)
+        for pattern in &self.patterns {
+            if pattern.is_match(text) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Get count of matched patterns (for scoring)
+    pub fn matched_patterns(&self, text: &str) -> usize {
+        let mut count = 0;
+
+        for keyword in &self.keywords {
+            if text.contains(keyword) {
+                count += 1;
+            }
+        }
+
+        for pattern in &self.patterns {
+            if pattern.is_match(text) {
+                count += 1;
+            }
+        }
+
+        count
+    }
+}
+
+impl Default for ErrorKeywordMatcher {
+    /// Default matcher with common error keywords (P1 - Production ready)
+    fn default() -> Self {
+        Self::with_keywords(vec![
+            "error",
+            "exception",
+            "failed",
+            "failure",
+            "warn",
+            "warning",
+            "critical",
+            "fatal",
+            "stack trace",
+            "traceback",
+            "panic",
+            "timeout",
+            "denied",
+            "forbidden",
+            "unauthorized",
+        ])
+    }
+}
 
 /// Anomaly score components
 #[derive(Debug, Clone)]
@@ -71,13 +191,14 @@ pub struct AnomalyDetector {
     window_size: usize,
 }
 
-/// Response data for analysis
+/// Response data for analysis (P1 - Includes body for regex keyword matching)
 #[derive(Debug, Clone)]
 pub struct ResponseData {
     pub status: u16,
     pub content_length: usize,
     pub elapsed_ms: u64,
-    pub has_error_keywords: bool,
+    /// Response body content (for error keyword detection)
+    pub body: String,
 }
 
 impl AnomalyDetector {
@@ -201,8 +322,8 @@ impl AnomalyDetector {
         });
     }
 
-    /// Analyzes a response for anomalies
-    pub fn analyze(&self, response: &ResponseData) -> AnomalyScore {
+    /// Analyzes a response for anomalies (P1 - Supports regex error keywords)
+    pub fn analyze(&self, response: &ResponseData, matcher: &ErrorKeywordMatcher) -> AnomalyScore {
         let baseline = match &self.baseline {
             Some(b) => b,
             None => return AnomalyScore {
@@ -216,7 +337,8 @@ impl AnomalyDetector {
 
         let timing_anomaly = self.calculate_timing_anomaly(response, baseline);
         let size_anomaly = self.calculate_size_anomaly(response, baseline);
-        let error_anomaly = if response.has_error_keywords { 0.5 } else { 0.0 };
+        // P1: Use regex matcher for flexible error detection
+        let error_anomaly = if matcher.contains_error(&response.body) { 0.5 } else { 0.0 };
         let status_anomaly = if response.status != baseline.expected_status { 0.3 } else { 0.0 };
 
         let combined_score = (timing_anomaly * 0.3
@@ -276,15 +398,15 @@ impl AnomalyDetector {
         }
     }
 
-    /// Detects if response should trigger investigation
-    pub fn is_anomalous(&self, response: &ResponseData, threshold: f32) -> bool {
-        let score = self.analyze(response);
+    /// Detects if response should trigger investigation (P1 - Regex matcher support)
+    pub fn is_anomalous(&self, response: &ResponseData, matcher: &ErrorKeywordMatcher, threshold: f32) -> bool {
+        let score = self.analyze(response, matcher);
         score.combined_score > threshold
     }
 
-    /// Gets severity classification of anomaly
-    pub fn classify_severity(&self, response: &ResponseData) -> SeverityClass {
-        let score = self.analyze(response);
+    /// Gets severity classification of anomaly (P1 - Regex matcher support)
+    pub fn classify_severity(&self, response: &ResponseData, matcher: &ErrorKeywordMatcher) -> SeverityClass {
+        let score = self.analyze(response, matcher);
 
         match score.combined_score {
             s if s > 0.8 => SeverityClass::Critical,
@@ -378,6 +500,10 @@ impl AnomalyInterpreter {
 mod tests {
     use super::*;
 
+    fn default_matcher() -> ErrorKeywordMatcher {
+        ErrorKeywordMatcher::default()
+    }
+
     #[test]
     fn test_anomaly_detector_creation() {
         let detector = AnomalyDetector::new();
@@ -391,7 +517,7 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 100,
-            has_error_keywords: false,
+            body: String::new(),
         };
 
         detector.record_response(response);
@@ -407,7 +533,7 @@ mod tests {
                 status: 200,
                 content_length: 1000 + i * 100,
                 elapsed_ms: 100 + i as u64 * 10,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -424,7 +550,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 90 + i as u64 * 5,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -433,10 +559,10 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 1000,
-            has_error_keywords: false,
+            body: String::new(),
         };
 
-        let score = detector.analyze(&anomalous);
+        let score = detector.analyze(&anomalous, &default_matcher());
         assert!(score.timing_anomaly > 0.0 || score.combined_score > 0.0);
     }
 
@@ -449,7 +575,7 @@ mod tests {
                 status: 200,
                 content_length: 900 + i * 100,
                 elapsed_ms: 100,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -457,10 +583,10 @@ mod tests {
             status: 200,
             content_length: 10000,
             elapsed_ms: 100,
-            has_error_keywords: false,
+            body: String::new(),
         };
 
-        let score = detector.analyze(&anomalous);
+        let score = detector.analyze(&anomalous, &default_matcher());
         assert!(score.size_anomaly > 0.0 || score.combined_score > 0.0);
     }
 
@@ -472,10 +598,10 @@ mod tests {
             status: 403,
             content_length: 1000000,
             elapsed_ms: 10000,
-            has_error_keywords: true,
+            body: "error".to_string(),
         };
 
-        let severity = detector.classify_severity(&high_anomaly);
+        let severity = detector.classify_severity(&high_anomaly, &default_matcher());
         assert_eq!(severity, SeverityClass::None); // No baseline yet
     }
 
@@ -543,7 +669,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -552,7 +678,7 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 7000,
-            has_error_keywords: false,
+            body: String::new(),
         });
 
         let baseline = detector.baseline.as_ref().unwrap();
@@ -578,7 +704,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 90 + i as u64 * 5,  // 90, 95, 100, 105, 110
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -587,10 +713,10 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 105,
-            has_error_keywords: false,
+            body: String::new(),
         };
 
-        let score = detector.analyze(&normal);
+        let score = detector.analyze(&normal, &default_matcher());
         assert_eq!(score.timing_anomaly, 0.0, "105ms should not be anomalous vs 90-110ms baseline");
 
         // Test: truly anomalous (500ms) - SHOULD be anomalous
@@ -598,10 +724,10 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 500,
-            has_error_keywords: false,
+            body: String::new(),
         };
 
-        let score = detector.analyze(&very_slow);
+        let score = detector.analyze(&very_slow, &default_matcher());
         assert!(score.timing_anomaly > 0.0, "500ms should be anomalous vs 90-110ms baseline");
     }
 
@@ -615,7 +741,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -624,7 +750,7 @@ mod tests {
             status: 200,
             content_length: 100000,
             elapsed_ms: 100,
-            has_error_keywords: false,
+            body: String::new(),
         });
 
         let baseline = detector.baseline.as_ref().unwrap();
@@ -647,7 +773,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 99 + i as u64,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -660,7 +786,7 @@ mod tests {
             status: 200,
             content_length: 1000,
             elapsed_ms: 5000,
-            has_error_keywords: false,
+            body: String::new(),
         });
 
         let baseline2 = detector.baseline.as_ref().unwrap();
@@ -700,7 +826,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100 + i as u64,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -718,7 +844,7 @@ mod tests {
                 status: 200,
                 content_length: 1000 * i,
                 elapsed_ms: 100 * i as u64,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -745,7 +871,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100 + i as u64 % 50,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -756,7 +882,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100 + i as u64 % 50,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -781,7 +907,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 100,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -791,7 +917,7 @@ mod tests {
                 status: 200,
                 content_length: 1000,
                 elapsed_ms: 200,
-                has_error_keywords: false,
+                body: String::new(),
             });
         }
 
@@ -799,5 +925,191 @@ mod tests {
         let baseline = detector.baseline.as_ref().unwrap();
         assert!(baseline.median_time > 150.0, "Should reflect recent WAF changes");
         assert_eq!(detector.response_count(), 20, "Window should contain only recent responses");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // REGEX ERROR KEYWORD TESTS (P1 - Flexible pattern matching)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_error_keyword_matcher_default() {
+        let matcher = ErrorKeywordMatcher::default();
+
+        assert!(matcher.contains_error("error occurred"));
+        assert!(matcher.contains_error("exception: null pointer"));
+        assert!(matcher.contains_error("fatal: database failure"));
+        assert!(!matcher.contains_error("Success: operation completed"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_custom_keywords() {
+        let matcher = ErrorKeywordMatcher::with_keywords(vec!["SQL", "SYNTAX"]);
+
+        assert!(matcher.contains_error("SQL injection detected"));
+        assert!(matcher.contains_error("SYNTAX error on line 5"));
+        assert!(!matcher.contains_error("No problems here"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_regex_patterns() {
+        let matcher = ErrorKeywordMatcher::with_patterns(vec![
+            r"ORA-\d+",           // Oracle errors: ORA-00942, ORA-01234
+            r"SQL.*syntax",       // SQL syntax errors (case-insensitive)
+        ]).unwrap();
+
+        assert!(matcher.contains_error("ORA-00942: table does not exist"));
+        assert!(matcher.contains_error("ORA-01234: privilege denied"));
+        assert!(matcher.contains_error("SQL syntax error on line 1"));
+        assert!(!matcher.contains_error("No errors"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_keywords_and_patterns() {
+        let matcher = ErrorKeywordMatcher::with_keywords_and_patterns(
+            vec!["error", "failed"],
+            vec![r"ORA-\d+", r"Warning:.*"],
+        ).unwrap();
+
+        // Should match keywords
+        assert!(matcher.contains_error("error message"));
+        assert!(matcher.contains_error("failed operation"));
+
+        // Should match patterns
+        assert!(matcher.contains_error("ORA-00942"));
+        assert!(matcher.contains_error("Warning: deprecated feature"));
+
+        assert!(!matcher.contains_error("All good"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_case_sensitivity() {
+        let matcher = ErrorKeywordMatcher::with_keywords(vec!["error"]);
+
+        assert!(matcher.contains_error("error"));
+        assert!(matcher.contains_error("error message"));
+        // Keywords are case-sensitive, so uppercase "Error" won't match lowercase keyword "error"
+        assert!(!matcher.contains_error("Error occurred"));
+        assert!(!matcher.contains_error("ERROR"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_regex_case_insensitive() {
+        // Regex patterns should use (?i) for case-insensitivity
+        let matcher = ErrorKeywordMatcher::with_patterns(vec![
+            r"(?i)warning.*",
+        ]).unwrap();
+
+        assert!(matcher.contains_error("warning: deprecated"));
+        assert!(matcher.contains_error("WARNING: DANGER"));
+        assert!(matcher.contains_error("Warning: careful"));
+    }
+
+    #[test]
+    fn test_error_keyword_matcher_matched_patterns_count() {
+        let matcher = ErrorKeywordMatcher::with_keywords_and_patterns(
+            vec!["error", "failed"],
+            vec![r"ORA-\d+"],
+        ).unwrap();
+
+        assert_eq!(matcher.matched_patterns("no match"), 0);
+        assert_eq!(matcher.matched_patterns("error occurred"), 1);
+        assert_eq!(matcher.matched_patterns("error and failed"), 2);
+        assert_eq!(matcher.matched_patterns("error and ORA-00942"), 2);
+        assert_eq!(matcher.matched_patterns("error ORA-00942 failed"), 3);
+    }
+
+    #[test]
+    fn test_anomaly_detection_with_regex_errors() {
+        let mut detector = AnomalyDetector::new();
+        let matcher = ErrorKeywordMatcher::with_patterns(vec![
+            r"SQL.*syntax",
+            r"ORA-\d+",
+        ]).unwrap();
+
+        // Build baseline with normal responses
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            });
+        }
+
+        // Test: Response with SQL error (P1 - Regex detection)
+        let sql_error = ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: "SQL syntax error on line 5".to_string(),
+        };
+
+        let score = detector.analyze(&sql_error, &matcher);
+        assert!(score.error_anomaly > 0.0, "Should detect SQL syntax error via regex");
+
+        // Test: Response with Oracle error code
+        let oracle_error = ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: "ORA-00942: table does not exist".to_string(),
+        };
+
+        let score = detector.analyze(&oracle_error, &matcher);
+        assert!(score.error_anomaly > 0.0, "Should detect ORA error code via regex");
+    }
+
+    #[test]
+    fn test_anomaly_detection_no_false_positives() {
+        let mut detector = AnomalyDetector::new();
+        let strict_matcher = ErrorKeywordMatcher::with_patterns(vec![
+            r"SQL.*syntax",
+        ]).unwrap();
+
+        // Build baseline
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: "Normal response body".to_string(),
+            });
+        }
+
+        // Test: Response with "SQL" but not "SQL syntax"
+        let response = ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: "SELECT * FROM users".to_string(),  // Contains SQL keyword but not pattern
+        };
+
+        let score = detector.analyze(&response, &strict_matcher);
+        assert_eq!(score.error_anomaly, 0.0, "Should not trigger on partial SQL matches");
+    }
+
+    #[test]
+    fn test_error_regex_production_patterns() {
+        // Real-world error patterns (P1 - Production ready)
+        let matcher = ErrorKeywordMatcher::with_patterns(vec![
+            r"(?i)(error|exception|failed|fatal|critical)",  // Case-insensitive errors
+            r"ORA-\d+",                                       // Oracle errors
+            r"(?i)SQL.*syntax",                               // SQL syntax errors
+            r"(?i)warning",                                   // Warnings
+            r"(?i)denied|forbidden|unauthorized",             // Access errors
+            r"\[Errno \d+\]",                                 // System errors
+            r"Traceback.*in <module>",                        // Python errors
+            r"at \w+\.\w+.*\.java:\d+",                      // Java stack trace (simplified)
+        ]).unwrap();
+
+        // Should detect various error patterns
+        assert!(matcher.contains_error("ERROR: Cannot connect"));
+        assert!(matcher.contains_error("ORA-01017: invalid username/password"));
+        assert!(matcher.contains_error("SQL syntax error"));
+        assert!(matcher.contains_error("WARNING: Configuration invalid"));
+        assert!(matcher.contains_error("Access denied"));
+        assert!(matcher.contains_error("[Errno 404]"));
+        assert!(matcher.contains_error("Traceback (most recent call last): File \"app.py\", line 42, in <module>"));
+        assert!(matcher.contains_error("at com.app.UserService.getUser(UserService.java:100)"));
     }
 }
