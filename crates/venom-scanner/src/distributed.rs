@@ -4,9 +4,36 @@
 //! for horizontal scaling across multiple nodes.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, HashSet};
 use std::sync::Arc;
 use dashmap::DashMap;
+
+/// Worker capability tags (task affinity)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkerTag {
+    #[serde(rename = "linux")]
+    Linux,
+    #[serde(rename = "windows")]
+    Windows,
+    #[serde(rename = "gpu")]
+    GPU,
+    #[serde(rename = "internal")]
+    Internal,
+    #[serde(rename = "external")]
+    External,
+}
+
+impl WorkerTag {
+    pub fn as_str(&self) -> &str {
+        match self {
+            WorkerTag::Linux => "linux",
+            WorkerTag::Windows => "windows",
+            WorkerTag::GPU => "gpu",
+            WorkerTag::Internal => "internal",
+            WorkerTag::External => "external",
+        }
+    }
+}
 
 /// Worker node in distributed system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,13 +47,12 @@ pub struct WorkerNode {
     pub current_tasks: u32,
     pub completed_tasks: u64,
     pub last_heartbeat: u64,
-            cpu_utilization: 30.0,
-            memory_utilization: 40.0,
-            network_utilization: 20.0,
     // Dynamic resource metrics
     pub cpu_utilization: f32,      // 0.0-100.0 percent
     pub memory_utilization: f32,   // 0.0-100.0 percent
     pub network_utilization: f32,  // 0.0-100.0 percent
+    // Task affinity tags (linux, windows, gpu, internal, external)
+    pub tags: HashSet<WorkerTag>,
 }
 
 /// Worker status
