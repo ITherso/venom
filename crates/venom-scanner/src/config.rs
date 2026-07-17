@@ -4,6 +4,66 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Lua Engine Configuration (P0 - configurable from config file)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaEngineConfig {
+    /// Maximum execution history per script (prevents unbounded memory)
+    /// Example: adaptive: history_size = 50
+    pub history_size: usize,
+    /// Maximum memory per Lua VM (bytes)
+    pub max_memory_bytes: usize,
+    /// Default script timeout (milliseconds)
+    pub default_timeout_ms: u64,
+}
+
+impl LuaEngineConfig {
+    /// Default config: reasonable limits for production
+    pub fn default() -> Self {
+        Self {
+            history_size: 100,          // Keep last 100 executions
+            max_memory_bytes: 50_000_000, // 50MB per script
+            default_timeout_ms: 5000,   // 5 second default
+        }
+    }
+
+    /// Minimal config: for CI/tests
+    pub fn minimal() -> Self {
+        Self {
+            history_size: 10,
+            max_memory_bytes: 10_000_000,
+            default_timeout_ms: 1000,
+        }
+    }
+
+    /// Extended config: for dashboards/analysis
+    pub fn extended() -> Self {
+        Self {
+            history_size: 500,          // Keep more history
+            max_memory_bytes: 100_000_000, // 100MB per script
+            default_timeout_ms: 30000,  // 30 second limit
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.history_size == 0 {
+            return Err("history_size must be > 0".to_string());
+        }
+        if self.max_memory_bytes == 0 {
+            return Err("max_memory_bytes must be > 0".to_string());
+        }
+        if self.default_timeout_ms == 0 {
+            return Err("default_timeout_ms must be > 0".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl Default for LuaEngineConfig {
+    fn default() -> Self {
+        Self::default()
+    }
+}
+
 /// Scan intensity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScanIntensity {
@@ -51,6 +111,8 @@ pub struct ScanConfig {
     pub phases: Vec<u8>,
     /// Custom headers
     pub headers: Vec<(String, String)>,
+    /// Lua Engine configuration (P0 - configurable from file)
+    pub lua_engine: LuaEngineConfig,
 }
 
 impl ScanConfig {
@@ -72,6 +134,7 @@ impl ScanConfig {
             max_payload_size: 1000,
             phases: vec![1, 2, 3],
             headers: Vec::new(),
+            lua_engine: LuaEngineConfig::minimal(),
         }
     }
 
@@ -88,6 +151,7 @@ impl ScanConfig {
             max_payload_size: 5000,
             phases: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             headers: Vec::new(),
+            lua_engine: LuaEngineConfig::default(),
         }
     }
 
@@ -104,6 +168,7 @@ impl ScanConfig {
             max_payload_size: 10000,
             phases: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             headers: Vec::new(),
+            lua_engine: LuaEngineConfig::default(),
         }
     }
 
@@ -122,6 +187,7 @@ impl ScanConfig {
             headers: vec![
                 ("User-Agent".to_string(), "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".to_string()),
             ],
+            lua_engine: LuaEngineConfig::extended(),  // Extended history for stealth
         }
     }
 

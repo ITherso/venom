@@ -11,6 +11,7 @@ use uuid::Uuid;
 use std::str::FromStr;
 use tokio::time::{Duration, timeout};
 use mlua::{Lua, Table};
+use crate::config::LuaEngineConfig;
 
 /// Script categories (type-safe, no typos, autocomplete)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -567,14 +568,19 @@ pub struct LuaScriptRegistry {
 }
 
 impl LuaScriptRegistry {
-    /// Creates new Lua script registry with bounded execution history (100 entries per script)
-    pub fn new() -> Self {
+    /// Creates new Lua script registry from config (P0 - production ready)
+    pub fn from_config(config: &LuaEngineConfig) -> Self {
         Self {
             scripts: Arc::new(dashmap::DashMap::new()),
             execution_history: Arc::new(dashmap::DashMap::new()),
             enabled_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_history_size: 100,
+            max_history_size: config.history_size,  // From config
         }
+    }
+
+    /// Creates new Lua script registry with bounded execution history (100 entries per script)
+    pub fn new() -> Self {
+        Self::from_config(&LuaEngineConfig::default())
     }
 
     /// Creates new registry with custom history size limit
