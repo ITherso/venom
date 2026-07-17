@@ -162,6 +162,7 @@ pub struct ScanTask {
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
     pub priority: TaskPriority,
+    pub retry_count: u32,  // Track retry attempts (max 3)
 }
 
 /// Task status
@@ -205,6 +206,7 @@ pub enum TaskPriority {
 }
 
 /// Task queue for managing distributed work (FIFO per priority)
+#[derive(Clone)]
 pub struct TaskQueue {
     tasks: Arc<DashMap<String, ScanTask>>,
     queue: Arc<DashMap<u8, VecDeque<String>>>, // priority -> FIFO task_ids (NOT LIFO!)
@@ -337,6 +339,42 @@ impl WorkerPool {
                     worker.completed_tasks += 1;
                 }
             }
+        }
+    }
+
+    /// Retry failed task (requeue if retry_count < max_retries)
+    /// Returns true if task will be retried, false if max retries exceeded
+    pub fn retry_task(&self, task_id: &str, max_retries: u32) -> bool {
+        if let Some(mut task) = self.task_queue.get_task(task_id) {
+            // Release from current worker
+            if let Some(worker_id) = task.assigned_to.clone() {
+                if let Some(mut worker) = self.workers.get_mut(&worker_id) {
+                    worker.current_tasks = worker.current_tasks.saturating_sub(1);
+                }
+            }
+
+            // Check retry limit
+            if task.retry_count < max_retries {
+                task.retry_count += 1;
+                task.status = TaskStatus::Queued;  // Requeue
+                task.assigned_to = None;  // Unassign from current worker
+                task.started_at = None;  // Reset start time for next attempt
+                self.task_queue.update_task(task);
+                true
+            } else {
+                // Max retries exceeded
+                task.status = TaskStatus::Failed;
+                task.completed_at = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+                self.task_queue.update_task(task);
+                false
+            }
+        } else {
+            false
         }
     }
 
@@ -982,5 +1020,159 @@ mod tests {
 
         let selected = pool.get_available_worker();
         assert_eq!(selected.unwrap().worker_id, "w1");
+    }
+
+    #[test]
+    fn test_retry_task_increment_count() {
+        let queue = TaskQueue::new();
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2, 3],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: 1000,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        queue.enqueue(task);
+
+        // Task should retry (count < max_retries)
+        let retried = queue.retry_task("t1", 3);
+        assert!(retried);
+
+        let updated_task = queue.get_task("t1").unwrap();
+        assert_eq!(updated_task.retry_count, 1);
+        assert_eq!(updated_task.status, TaskStatus::Queued);
+        assert_eq!(updated_task.assigned_to, None);
+    }
+
+    #[test]
+    fn test_retry_task_max_retries_exceeded() {
+        let queue = TaskQueue::new();
+        let mut task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2, 3],
+            assigned_to: Some("w1".to_string()),
+            status: TaskStatus::Running,
+            created_at: 1000,
+            started_at: Some(1005),
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 3,  // Already at max
+        };
+
+        queue.enqueue(task);
+
+        // Task should NOT retry (count >= max_retries)
+        let retried = queue.retry_task("t1", 3);
+        assert!(!retried);
+
+        let updated_task = queue.get_task("t1").unwrap();
+        assert_eq!(updated_task.retry_count, 3);
+        assert_eq!(updated_task.status, TaskStatus::Failed);
+        assert!(updated_task.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_retry_task_release_worker() {
+        let pool = WorkerPool::new();
+        let queue = pool.task_queue.clone();
+
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 1,  // Has 1 task assigned
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+        };
+
+        pool.register_worker(worker);
+
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2],
+            assigned_to: Some("w1".to_string()),
+            status: TaskStatus::Running,
+            created_at: 1000,
+            started_at: Some(1005),
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        queue.enqueue(task);
+
+        // Worker has 1 task before retry
+        assert_eq!(pool.get_workers()[0].current_tasks, 1);
+
+        // Retry should release worker
+        pool.retry_task("t1", 3);
+
+        // Worker should have 0 tasks after retry
+        assert_eq!(pool.get_workers()[0].current_tasks, 0);
+
+        let retried_task = queue.get_task("t1").unwrap();
+        assert_eq!(retried_task.assigned_to, None);
+        assert_eq!(retried_task.started_at, None);
+    }
+
+    #[test]
+    fn test_retry_task_progression() {
+        let queue = TaskQueue::new();
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: 1000,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::High,
+            retry_count: 0,
+        };
+
+        queue.enqueue(task);
+
+        // First retry
+        let retry1 = queue.retry_task("t1", 3);
+        assert!(retry1);
+        let t = queue.get_task("t1").unwrap();
+        assert_eq!(t.retry_count, 1);
+
+        // Second retry
+        let retry2 = queue.retry_task("t1", 3);
+        assert!(retry2);
+        let t = queue.get_task("t1").unwrap();
+        assert_eq!(t.retry_count, 2);
+
+        // Third retry
+        let retry3 = queue.retry_task("t1", 3);
+        assert!(retry3);
+        let t = queue.get_task("t1").unwrap();
+        assert_eq!(t.retry_count, 3);
+
+        // Fourth attempt should fail (max reached)
+        let retry4 = queue.retry_task("t1", 3);
+        assert!(!retry4);
+        let t = queue.get_task("t1").unwrap();
+        assert_eq!(t.status, TaskStatus::Failed);
     }
 }
