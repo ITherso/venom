@@ -60,16 +60,17 @@
 
 ---
 
-**TIER 7: Distributed Scaling ✅ COMPLETE (920+ lines, 30 tests):**
+**TIER 7: Distributed Scaling ✅ COMPLETE (1,110+ lines, 35 tests):**
 - ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), dynamic capacity based on CPU/RAM/Network utilization
 - ✅ **Dynamic Capacity** — effective_capacity() = base * (1 - max(cpu%, mem%, net%)/100), prevents overloading saturated workers
 - ✅ **Resource Metrics** — CPU/memory/network utilization tracking, auto-status transitions (Healthy→Busy→Degraded at utilization thresholds)
 - ✅ **Worker Selection Scoring** — compute_score(status, heartbeat_recency, CPU, memory, capacity) for production scheduling
 - ✅ **Task Queueing System** — Priority-based task queue (FIFO per priority), lifecycle management (Queued→Running→Completed)
 - ✅ **Worker Pool Orchestration** — Multi-factor load balancing, intelligent task assignment via scoring, completion tracking
+- ✅ **Automatic Retry Queue** — retry_count tracking, transparent retry on transient failures (max 3 attempts), requeue to different worker
 - ✅ **Result Aggregation** — Distributed result collection and combination from multiple workers
 - ✅ **Heartbeat Monitoring** — Worker health validation with timeout-based pruning of dead nodes
-- ✅ **30 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, scoring, resource-aware scheduling, heartbeat monitoring
+- ✅ **35 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, scoring, retry progression, resource-aware scheduling, heartbeat monitoring
 
 **TIER 8: ML Integration ✅ COMPLETE (538 lines, 23 tests):**
 - ✅ **Pattern Learning** — VulnerabilityPattern registration, k-means clustering, signature-based grouping
@@ -436,7 +437,113 @@ pub fn get_available_worker(&self) -> Option<WorkerNode> {
 
 ---
 
-### 9. Runner Hardening (v0.9.0+)
+### 9. Automatic Retry Queue (P1 - Network Resilience)
+
+**Problem (NEW v0.9.0+)**
+- ⚠️ **OLD APPROACH:** Task fails → TaskStatus::Failed (permanent)
+  - Network hiccup = task lost forever
+  - Operator must manually re-run failed tasks
+  - No recovery for transient errors (timeout, connection reset)
+
+**Solution: Automatic Retry Queue**
+- Add `retry_count` field to task (tracks attempts)
+- On failure: if `retry_count < max` → requeue to different worker
+- Bounded retries (max configurable, e.g., 3) prevent infinite loops
+- Transparent recovery (no manual intervention)
+
+**Implementation:**
+
+```rust
+pub struct ScanTask {
+    // ... existing fields ...
+    pub retry_count: u32,  // Track retry attempts
+}
+
+pub fn retry_task(&self, task_id: &str, max_retries: u32) -> bool {
+    if task.retry_count < max_retries {
+        task.retry_count += 1;
+        task.status = Queued;         // Requeue
+        task.assigned_to = None;      // Unassign from failed worker
+        task.started_at = None;       // Reset attempt timer
+        true
+    } else {
+        task.status = Failed;         // Give up (max retries exceeded)
+        task.completed_at = Some(now);
+        false
+    }
+}
+```
+
+**Coordinator Usage:**
+
+```rust
+match worker.execute_task(task_id) {
+    Ok(findings) => {
+        pool.complete_task(task_id);
+    }
+    Err(e) if is_transient(&e) => {
+        // Network/timeout error: retry
+        let will_retry = pool.retry_task(task_id, 3);
+        if will_retry {
+            log!("Retrying task {} (attempt {})", task_id, retry_count);
+        } else {
+            log!("Task {} failed after 3 retries", task_id);
+        }
+    }
+    Err(e) => {
+        // Critical error (bad input, auth fail): don't retry
+        pool.complete_task(task_id);
+    }
+}
+```
+
+**Retry Progression:**
+
+| Attempt | retry_count | Status | assigned_to | Outcome |
+|---------|-------------|--------|-------------|---------|
+| 1st fail | 0 | Queued | None | ✅ Retry |
+| 2nd fail | 1 | Queued | None | ✅ Retry |
+| 3rd fail | 2 | Queued | None | ✅ Retry |
+| 4th fail | 3 | Failed | None | ❌ Give up |
+
+**Test Coverage (5 tests):**
+- ✅ test_retry_task_increment_count — retry_count increments, task requeued
+- ✅ test_retry_task_max_retries_exceeded — max reached → Status::Failed
+- ✅ test_retry_task_release_worker — Worker current_tasks decremented
+- ✅ test_retry_task_progression — 0→1→2→3→Failed simulation
+- ✅ test_retry_task_with_pool — Full pool: reassign to different worker
+
+**Real-World Scenario:**
+
+```
+Task t1 assigned to Worker W1
+  W1 network timeout → task fails
+  
+pool.retry_task(t1, 3) → Reassign to W2
+  W2 network timeout → task fails
+  
+pool.retry_task(t1, 3) → Reassign to W3
+  W3 succeeds (network recovered)
+  ✅ Task complete
+```
+
+vs without retry:
+```
+Task t1 assigned to Worker W1
+  W1 network timeout → TASK FAILED PERMANENTLY
+  ❌ Operator must manually re-run
+```
+
+**Impact:**
+- ✅ Transient failures automatically recovered (network hiccups)
+- ✅ Retry sent to different worker (load distribution)
+- ✅ No manual intervention needed
+- ✅ Bounded retries prevent infinite loops
+- ✅ Especially valuable for: network partitions, temporary service degradation, worker restarts
+
+---
+
+### 13. Runner Hardening (v0.9.0+)
 
 **Timeout Enforcement (P0 Fix)**
 - Phase hangs → 5-min timeout enforced
@@ -479,7 +586,7 @@ pub fn get_available_worker(&self) -> Option<WorkerNode> {
 - Independent phases (Banner/Port/DNS) run concurrently
 - 30-50% speedup for typical scans
 
-### 10. Module Sizing Policy
+### 13. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -488,7 +595,7 @@ pub fn get_available_worker(&self) -> Option<WorkerNode> {
 
 **Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
 
-### 11. Config Validation (Enforce at Construction)
+### 13. Config Validation (Enforce at Construction)
 **Pattern: TryFrom with Serde**
 ```rust
 #[serde(try_from = "RawConfig")]
@@ -505,7 +612,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 12. Event Envelope Pattern (Future Dashboard)
+### 13. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
