@@ -952,10 +952,13 @@ cargo build --release
   - Async handlers: Arc<dyn Fn(&Event)> for non-blocking execution
   - Query methods: get_events_by_correlation(), get_events_sorted(), get_events_by_correlation_and_time()
 - 📜 **Lua Script Engine** — Custom scanning logic via Lua scripts
-  - LuaScript metadata (id, name, version, categories, author, timeout)
+  - LuaScript metadata (id: UUID, name, version, categories: enum, author, timeout) with collision-free identification
+  - Secure path handling: Canonicalized paths + root directory validation (blocks ../../../../etc/passwd attacks)
   - LuaContext with target, payload, parameters, execution config
-  - Registry with category filtering and execution history
+  - Registry with type-safe category filtering and **bounded execution history** (VecDeque, 100 entries/script by default, prevents 936GB→25MB memory growth)
+  - get_history() returns all entries (oldest first), get_recent_history(n) returns last N (newest first)
   - Script lifecycle: Loaded → Running → Completed/Failed/Timeout
+  - **v0.9.1+:** UUID script IDs (P0), path traversal protection (P0), category enums (P1), status tracking (P1), bounded history (P1)
 - ⚙️ **Config Profiles** — Pre-configured scanning strategies
   - **Enterprise**: Compliance-focused, Light intensity, detailed reporting
   - **Cloud**: AWS/GCP/Azure detection, 16 concurrent workers
@@ -963,7 +966,7 @@ cargo build --release
   - **Passive**: Stealth-only, 0 invasive payloads
   - Profile merging for custom configurations
 - 📊 **Metrics** — Event history, execution tracking, performance stats
-- ✅ **50 Tests** — 42 unit + 8 integration tests covering all workflows
+- ✅ **54 Tests** — 46 unit + 8 integration tests covering all workflows (includes 4 new bounded-history tests: overflow, recent access, per-script isolation)
 
 ### ✅ TIER 16: Plugin Architecture & Modular Scanners
 
