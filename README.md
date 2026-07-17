@@ -60,12 +60,14 @@
 
 ---
 
-**TIER 7: Distributed Scaling ✅ COMPLETE (530 lines, 16 tests):**
-- ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), capacity-based scheduling
+**TIER 7: Distributed Scaling ✅ COMPLETE (730+ lines, 25 tests):**
+- ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), dynamic capacity based on CPU/RAM/Network utilization
+- ✅ **Dynamic Capacity** — effective_capacity() = base * (1 - max(cpu%, mem%, net%)/100), prevents overloading saturated workers
+- ✅ **Resource Metrics** — CPU/memory/network utilization tracking, auto-status transitions (Healthy→Busy→Degraded at utilization thresholds)
 - ✅ **Task Queueing System** — Priority-based task queue (FIFO per priority), lifecycle management (Queued→Running→Completed)
-- ✅ **Worker Pool Orchestration** — Multi-node load balancing, automatic task assignment, completion tracking
+- ✅ **Worker Pool Orchestration** — Multi-node load balancing, automatic task assignment respecting dynamic capacity, completion tracking
 - ✅ **Result Aggregation** — Distributed result collection and combination from multiple workers
-- ✅ **16 Comprehensive Tests** — Multi-worker scenarios, priority ordering, load balancing, concurrent operations
+- ✅ **25 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, resource-aware scheduling, heartbeat monitoring
 
 **TIER 8: ML Integration ✅ COMPLETE (538 lines, 23 tests):**
 - ✅ **Pattern Learning** — VulnerabilityPattern registration, k-means clustering, signature-based grouping
@@ -271,7 +273,74 @@ worker.send_heartbeat() -> {
 
 ---
 
-### 7. Runner Hardening (v0.9.0+)
+### 7. Dynamic Worker Capacity (P1 - Resource-Aware Scheduling)
+
+**Problem (NEW v0.9.0+)**
+- ⚠️ **ISSUE:** Worker capacity was static (fixed `capacity: u32`)
+- ⚠️ **IMPACT:** No visibility into actual resource constraints
+  - Overloaded nodes (CPU 95%, RAM full) still accepted new tasks
+  - Could assign work to saturated workers (causes failures/timeouts)
+  - No adaptive load balancing based on real utilization
+
+**Solution: Dynamic Effective Capacity**
+- Track real-time metrics: CPU (%), Memory (%), Network (%) utilization
+- `effective_capacity = base_capacity * (1 - max(cpu, mem, net) / 100)`
+- Example: base=10, cpu=50% → effective = 10 * 0.5 = 5 max slots
+- Example: base=10, cpu=95% → effective = 10 * 0.05 = 0.5 → ceil = 1 slot
+
+```rust
+pub fn effective_capacity(&self) -> u32
+  - Reduces available capacity based on highest resource utilization
+  - Offline/Degraded workers return 0 (can't take tasks)
+  - Respects Healthy/Busy/Degraded/Offline status
+
+pub fn available_slots(&self) -> u32
+  - effective_capacity - current_tasks
+  - Safe slot count for new task assignment
+  - Returns 0 when saturated
+
+pub fn update_metrics(&mut self, cpu, memory, network)
+  - Called when heartbeat arrives (include sysinfo)
+  - Clamps values 0-100%
+
+pub fn compute_status(&mut self)
+  - Auto-transitions: Healthy → Busy (>80%) → Degraded (>90%)
+  - Scheduler respects status (won't assign to Degraded nodes)
+```
+
+**Usage Pattern:**
+```rust
+// Worker heartbeat (includes resource metrics from sysinfo)
+worker.update_metrics(cpu_util, mem_util, net_util);  // e.g., 75%, 60%, 40%
+worker.compute_status();  // → WorkerStatus::Busy (>80% threshold)
+
+// Coordinator scheduler
+if let Some(worker) = pool.get_available_worker() {
+    // Now checks available_slots() (respects dynamic capacity)
+    // Won't assign to worker if:
+    //   - effective_capacity <= current_tasks (fully booked), OR
+    //   - status != Healthy (Busy/Degraded/Offline)
+    pool.assign_task(task_id, &worker.worker_id);
+}
+```
+
+**Test Coverage (5 tests):**
+- ✅ test_effective_capacity_healthy — 30% util → 70% capacity
+- ✅ test_effective_capacity_high_utilization — 85% util → 15% capacity (ceil)
+- ✅ test_effective_capacity_offline_worker — Offline always 0 capacity
+- ✅ test_available_slots — Accounts for current_tasks + dynamic capacity
+- ✅ test_update_and_compute_metrics — Status transitions based on utilization
+
+**Impact:**
+- ✅ Prevents overloading saturated workers
+- ✅ Adaptive load balancing (responds to real resources)
+- ✅ Cloud-friendly (handles CPU throttling, memory pressure)
+- ✅ Automatic Busy/Degraded transitions based on utilization
+- ✅ Better failure rates (don't assign to saturated nodes)
+
+---
+
+### 8. Runner Hardening (v0.9.0+)
 
 **Timeout Enforcement (P0 Fix)**
 - Phase hangs → 5-min timeout enforced
@@ -314,7 +383,7 @@ worker.send_heartbeat() -> {
 - Independent phases (Banner/Port/DNS) run concurrently
 - 30-50% speedup for typical scans
 
-### 8. Module Sizing Policy
+### 9. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -323,7 +392,7 @@ worker.send_heartbeat() -> {
 
 **Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
 
-### 9. Config Validation (Enforce at Construction)
+### 10. Config Validation (Enforce at Construction)
 **Pattern: TryFrom with Serde**
 ```rust
 #[serde(try_from = "RawConfig")]
@@ -340,7 +409,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 10. Event Envelope Pattern (Future Dashboard)
+### 11. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
