@@ -219,7 +219,50 @@ Initialized
 
 **Current Gap:** 29 tests → Need 48+ tests (6 phases × 8 scenarios)
 
-### 6. Module Sizing Policy
+### 6. Runner Hardening (v0.9.0+)
+
+**Timeout Enforcement (P0 Fix)**
+- Phase hangs → 5-min timeout enforced
+- Prevents single phase from blocking entire scan
+- Logged as "Phase X timed out"
+
+**Graceful Cancellation**
+- CTRL+C or Dashboard cancel signal respected
+- Scan stops immediately, returns partial results
+- CancellationToken for cloud kill signals
+
+**Progress Events (Real-time Dashboard)**
+- PhaseStarted: When phase begins
+- PhaseCompleted: With finding count + elapsed time
+- PhaseFailed: With reason (timeout/cancelled/error)
+- EventBus publishes all events (no polling needed)
+
+**Future Improvements (v1.0+):**
+- ✅ Retry policy (transient errors: timeout, network)
+  - Exponential backoff (1s → 2s → 4s → max 30s)
+  - Max 3 retries configurable
+- ✅ Better return type (PipelineResult struct)
+  - `pub findings: Vec<ScanFinding>`
+  - `pub completed_phases: usize`
+  - `pub phase_results: Vec<PhaseResult>` (per-phase metrics)
+- ✅ Lazy sorting (finalize() or Builder pattern)
+  - Register phases without sorting
+  - Single sort before pipeline execution
+- ✅ Expanded tests (8 missing scenarios)
+  - Empty runner, phase failure, timeout, cancellation
+  - Retry logic, concurrent phase execution
+
+**Memory Efficiency (Future)**
+- Stream findings to persistence (DB) instead of accumulating
+- Keep only cache in memory (1K recent findings)
+- 100K findings: 500MB → 10MB (50x reduction)
+
+**Parallel Execution (Future v1.2+)**
+- DAG (Directed Acyclic Graph) for phase dependencies
+- Independent phases (Banner/Port/DNS) run concurrently
+- 30-50% speedup for typical scans
+
+### 7. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -228,7 +271,7 @@ Initialized
 
 **Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
 
-### 7. Config Validation (Enforce at Construction)
+### 8. Config Validation (Enforce at Construction)
 **Pattern: TryFrom with Serde**
 ```rust
 #[serde(try_from = "RawConfig")]
@@ -245,7 +288,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 8. Event Envelope Pattern (Future Dashboard)
+### 9. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
