@@ -67,6 +67,36 @@ impl std::fmt::Display for ScriptCategory {
     }
 }
 
+/// Script execution status (runtime tracking)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LuaScriptStatus {
+    #[serde(rename = "loaded")]
+    Loaded,         // Registered, ready to run
+    #[serde(rename = "running")]
+    Running,        // Currently executing
+    #[serde(rename = "completed")]
+    Completed,      // Finished successfully
+    #[serde(rename = "failed")]
+    Failed,         // Execution error
+}
+
+impl LuaScriptStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LuaScriptStatus::Loaded => "loaded",
+            LuaScriptStatus::Running => "running",
+            LuaScriptStatus::Completed => "completed",
+            LuaScriptStatus::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for LuaScriptStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Lua script metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaScript {
@@ -79,6 +109,7 @@ pub struct LuaScript {
     pub categories: Vec<ScriptCategory>,  // Type-safe: Web, DNS, SMB, SSH, Database (no typos)
     pub enabled: bool,
     pub timeout_ms: u64,
+    pub status: LuaScriptStatus,  // Runtime status (Loaded → Running → Completed/Failed)
 }
 
 impl LuaScript {
@@ -124,6 +155,7 @@ impl LuaScript {
             categories: vec![],
             enabled: true,
             timeout_ms: 5000,
+            status: LuaScriptStatus::Loaded,
         })
     }
 
@@ -140,6 +172,7 @@ impl LuaScript {
             categories: vec![],
             enabled: true,
             timeout_ms: 5000,
+            status: LuaScriptStatus::Loaded,
         }
     }
 
