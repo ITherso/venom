@@ -20,6 +20,49 @@ uuid = { workspace = true }
 memmap2 = { workspace = true }
 nom = { workspace = true }
 
+[features]
+# Default features: core scanner with detection capabilities
+default = ["core", "scanning", "detection"]
+
+# Core scanning engine (always compiled)
+core = []
+
+# Vulnerability scanning phases
+scanning = ["core"]
+
+# Detection & analysis capabilities
+detection = ["scanning"]
+
+# Machine learning for pattern discovery
+ml = ["detection"]
+
+# Distributed scaling (worker pools, task queues)
+distributed = ["scanning"]
+
+# Performance monitoring & profiling
+monitoring = ["scanning"]
+
+# Compliance & audit logging
+compliance = ["scanning"]
+
+# Threat intelligence feeds & correlation
+threat-intel = ["detection"]
+
+# Plugin system support
+plugins = ["core"]
+
+# Full-featured scanner (all capabilities)
+full = ["core", "scanning", "detection", "ml", "distributed", "monitoring", "compliance", "threat-intel", "plugins"]
+
+# Minimal scanner (just core phases, no advanced features)
+minimal = ["core", "scanning"]
+
+# Enterprise package (everything except threat-intel)
+enterprise = ["core", "scanning", "detection", "ml", "distributed", "monitoring", "compliance", "plugins"]
+
+# Research package (all features enabled)
+research = ["full"]
+
 [lib]
 name = "venom_scanner"
 path = "src/lib.rs"

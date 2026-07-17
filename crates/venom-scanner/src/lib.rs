@@ -9,66 +9,164 @@
 //! - **Zero-Copy**: DashMap for efficient, lock-free inter-phase communication
 //! - **Type-Safe**: Compile-time guarantees eliminate entire classes of bugs
 
-pub mod adaptive;
-pub mod advanced_detection;
-pub mod anomaly;
-pub mod api;
-pub mod api_gateway;
-pub mod auth;
-pub mod cache;
-pub mod compliance;
+// Core modules (always compiled)
+pub mod error;
 pub mod config;
 pub mod config_loader;
 pub mod context;
-pub mod dashboard;
-pub mod distributed;
-pub mod error;
-pub mod event_bus;
 pub mod logging;
-pub mod lua_engine;
 pub mod metrics;
-pub mod ml;
-pub mod monitoring;
-pub mod persistence;
+pub mod cache;
+pub mod auth;
+pub mod api;
+pub mod api_gateway;
+
+// Scanning engine (feature: scanning)
+#[cfg(feature = "scanning")]
 pub mod phases;
-pub mod plugin;
-pub mod plugins;
-pub mod post_exploitation;
-pub mod realtime;
-pub mod reporting;
+
+#[cfg(feature = "scanning")]
 pub mod runner;
-pub mod threat_intelligence;
+
+#[cfg(feature = "scanning")]
 pub mod waf;
 
-pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
-pub use advanced_detection::{BehavioralSignature, BehaviorIndicator, IndicatorType, ComparisonOperator, WafBypassTechnique, BypassCategory, BehavioralAnalyzer, BehavioralAnalysisData, DetectionResult, WafBypassSelector, SignatureEvasionEngine, EversionRule, EversionType};
-pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
+#[cfg(feature = "scanning")]
+pub mod adaptive;
+
+// Detection capabilities (feature: detection)
+#[cfg(feature = "detection")]
+pub mod advanced_detection;
+
+#[cfg(feature = "detection")]
+pub mod anomaly;
+
+// Machine learning (feature: ml)
+#[cfg(feature = "ml")]
+pub mod ml;
+
+// Distributed scaling (feature: distributed)
+#[cfg(feature = "distributed")]
+pub mod distributed;
+
+// Monitoring (feature: monitoring)
+#[cfg(feature = "monitoring")]
+pub mod monitoring;
+
+// Compliance (feature: compliance)
+#[cfg(feature = "compliance")]
+pub mod compliance;
+
+// Threat intelligence (feature: threat-intel)
+#[cfg(feature = "threat-intel")]
+pub mod threat_intelligence;
+
+// Post-exploitation (included with scanning)
+#[cfg(feature = "scanning")]
+pub mod post_exploitation;
+
+// Plugin system (feature: plugins)
+#[cfg(feature = "plugins")]
+pub mod plugin;
+
+#[cfg(feature = "plugins")]
+pub mod plugins;
+
+#[cfg(feature = "plugins")]
+pub mod lua_engine;
+
+// Persistence & reporting (included with scanning)
+#[cfg(feature = "scanning")]
+pub mod persistence;
+
+#[cfg(feature = "scanning")]
+pub mod reporting;
+
+#[cfg(feature = "scanning")]
+pub mod realtime;
+
+#[cfg(feature = "scanning")]
+pub mod dashboard;
+
+// Event bus (included with core for observability)
+pub mod event_bus;
+
+// Core exports (always available)
 pub use api::{ApiResponse, ScanStatus, ScanStatusType, StartScanRequest, ScanResultResponse, ApiEndpoints, ApiError};
 pub use api_gateway::{RateLimitStrategy, RateLimitPolicy, RateLimitStatus, ApiQuota, RateLimiter, TokenBucket, QuotaManager, RouteConfig, ApiGateway, RequestValidationResult};
 pub use auth::{User, UserRole, AuthToken, UserManager, UserInfo, LoginRequest, LoginResponse};
 pub use cache::{LruCache, CacheEntry, ResponseCache, CacheStats};
-pub use compliance::{ComplianceFramework, ComplianceRequirement, AuditEventType, AuditLogEntry, AuditLogger, ComplianceAssessment, ComplianceAssessor, DataProtectionRecord, DataClassification, DataProtectionManager, ComplianceReport, ComplianceReporter};
 pub use config::{ScanConfig, ScanIntensity};
 pub use config_loader::{ScanProfile as ScanningProfile, ConfigLoader};
-pub use event_bus::{EventBus, Event, EventType, EventSeverity, EventHandler};
-pub use lua_engine::{LuaScript, LuaContext, LuaExecutionResult, LuaScriptStatus, LuaScriptRegistry};
 pub use context::ScanContext;
-pub use dashboard::{DashboardOverview, DashboardService, DashboardConfig, ScanCard, FindingCard, FindingStatus, WidgetType};
-pub use distributed::{WorkerNode, WorkerStatus, ScanTask, TaskStatus, TaskPriority, TaskQueue, WorkerPool, ResultAggregator};
 pub use error::{ScannerError, Result};
 pub use logging::{LogEntry, LogLevel, Logger};
 pub use metrics::{MetricsCollector, MetricsSummary, PhaseMetrics};
-pub use ml::{PatternLearner, VulnerabilityPattern, ClusterResult, ExploitBuilder, ExploitationChain, ExploitStage, AnomalyClassifier, AnomalyPattern, AnomalyType};
-pub use monitoring::{PhaseProfile, ResourceMetrics, ScanProfile, PerformanceAnalyzer, OptimizationRecommendation, RecommendationCategory, BenchmarkSuite, BenchmarkResult, ScanComparison};
-pub use persistence::{DbConfig, EntityType, ScanRecord, FindingRecord, EndpointRecord, QueryBuilder, SchemaManager, TableSchema, ColumnDef, IndexDef, ConnectionPool, TransactionManager, Transaction, TransactionStatus, QueryResult};
-pub use plugin::{Plugin, PluginRegistry, PluginMetadata, PluginConfig, PluginCategory, PluginError, PluginExecutionResult};
-pub use plugins::{XSSPlugin, SQLiPlugin, LFIPlugin, XXEPlugin, SSRFPlugin, SSTIPlugin};
-pub use post_exploitation::{PayloadType, ReverseShell, Webshell, PersistenceMechanism, PersistenceTechnique, ExploitPayload, PostExploitSession, PrivilegeLevel, LateralTarget, PostExploitationManager};
-pub use realtime::{RealtimeEvent, EventStream, ConnectionManager, Subscription};
-pub use reporting::{VulnerabilityReport, ReportGenerator, ReportFormat};
+pub use event_bus::{EventBus, Event, EventType, EventSeverity, EventHandler};
+
+// Scanning engine exports (feature: scanning)
+// Note: phases module is re-exported automatically
+
+#[cfg(feature = "scanning")]
 pub use runner::ScanRunner;
-pub use threat_intelligence::{ThreatFeedSource, CVERecord, ThreatFeedEntry, ThreatSeverity, CVECorrelator, ThreatFeedManager, AlertRule, AlertAction, AlertEngine, SecurityAlert, ThreatActorProfile, ThreatIntelligenceRepo};
+
+#[cfg(feature = "scanning")]
 pub use waf::{WafDetector, WafProduct, PayloadEncoder, EvisionTechnique};
+
+#[cfg(feature = "scanning")]
+pub use adaptive::{AdaptiveEngine, AdaptationStrategy, DetectionPattern, PayloadMutator, ResponseMetrics};
+
+#[cfg(feature = "scanning")]
+pub use persistence::{DbConfig, EntityType, ScanRecord, FindingRecord, EndpointRecord, QueryBuilder, SchemaManager, TableSchema, ColumnDef, IndexDef, ConnectionPool, TransactionManager, Transaction, TransactionStatus, QueryResult};
+
+#[cfg(feature = "scanning")]
+pub use post_exploitation::{PayloadType, ReverseShell, Webshell, PersistenceMechanism, PersistenceTechnique, ExploitPayload, PostExploitSession, PrivilegeLevel, LateralTarget, PostExploitationManager};
+
+#[cfg(feature = "scanning")]
+pub use reporting::{VulnerabilityReport, ReportGenerator, ReportFormat};
+
+#[cfg(feature = "scanning")]
+pub use realtime::{RealtimeEvent, EventStream, ConnectionManager, Subscription};
+
+#[cfg(feature = "scanning")]
+pub use dashboard::{DashboardOverview, DashboardService, DashboardConfig, ScanCard, FindingCard, FindingStatus, WidgetType};
+
+// Detection exports (feature: detection)
+#[cfg(feature = "detection")]
+pub use advanced_detection::{BehavioralSignature, BehaviorIndicator, IndicatorType, ComparisonOperator, WafBypassTechnique, BypassCategory, BehavioralAnalyzer, BehavioralAnalysisData, DetectionResult, WafBypassSelector, SignatureEvasionEngine, EversionRule, EversionType};
+
+#[cfg(feature = "detection")]
+pub use anomaly::{AnomalyDetector, AnomalyScore, AnomalyInterpreter, SeverityClass, ResponseData};
+
+// Machine learning exports (feature: ml)
+#[cfg(feature = "ml")]
+pub use ml::{PatternLearner, VulnerabilityPattern, ClusterResult, ExploitBuilder, ExploitationChain, ExploitStage, AnomalyClassifier, AnomalyPattern, AnomalyType};
+
+// Distributed scaling exports (feature: distributed)
+#[cfg(feature = "distributed")]
+pub use distributed::{WorkerNode, WorkerStatus, ScanTask, TaskStatus, TaskPriority, TaskQueue, WorkerPool, ResultAggregator};
+
+// Monitoring exports (feature: monitoring)
+#[cfg(feature = "monitoring")]
+pub use monitoring::{PhaseProfile, ResourceMetrics, ScanProfile, PerformanceAnalyzer, OptimizationRecommendation, RecommendationCategory, BenchmarkSuite, BenchmarkResult, ScanComparison};
+
+// Compliance exports (feature: compliance)
+#[cfg(feature = "compliance")]
+pub use compliance::{ComplianceFramework, ComplianceRequirement, AuditEventType, AuditLogEntry, AuditLogger, ComplianceAssessment, ComplianceAssessor, DataProtectionRecord, DataClassification, DataProtectionManager, ComplianceReport, ComplianceReporter};
+
+// Threat intelligence exports (feature: threat-intel)
+#[cfg(feature = "threat-intel")]
+pub use threat_intelligence::{ThreatFeedSource, CVERecord, ThreatFeedEntry, ThreatSeverity, CVECorrelator, ThreatFeedManager, AlertRule, AlertAction, AlertEngine, SecurityAlert, ThreatActorProfile, ThreatIntelligenceRepo};
+
+// Plugin system exports (feature: plugins)
+#[cfg(feature = "plugins")]
+pub use plugin::{Plugin, PluginRegistry, PluginMetadata, PluginConfig, PluginCategory, PluginError, PluginExecutionResult};
+
+#[cfg(feature = "plugins")]
+pub use plugins::{XSSPlugin, SQLiPlugin, LFIPlugin, XXEPlugin, SSRFPlugin, SSTIPlugin};
+
+#[cfg(feature = "plugins")]
+pub use lua_engine::{LuaScript, LuaContext, LuaExecutionResult, LuaScriptStatus, LuaScriptRegistry};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
