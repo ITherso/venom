@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 venom-core = { path = "../venom-core" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["json", "cookies"] }
 async-trait = "0.1"
 dashmap = "5.5"

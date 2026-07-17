@@ -63,11 +63,41 @@ impl ScanRunner {
             ctx_arc.logger.log(start_entry);
             ctx_arc.log(format!("[*] Phase {}: {}", phase_num, phase_name));
 
-            // Execute phase with timeout (CRITICAL: prevent single phase from hanging entire scan)
+            // Execute phase with timeout + cancellation (CRITICAL: prevent hangs, allow graceful stop)
             let phase_timeout = Duration::from_secs(ctx_arc.phase_timeout_secs);
+            let cancel_token = ctx_arc.cancel_token.clone();
 
-            match timeout(phase_timeout, phase.execute(&ctx_arc)).await {
-                Ok(Ok(findings)) => {
+            // Check if cancellation requested before starting phase
+            if cancel_token.is_cancelled() {
+                let elapsed = start.elapsed().as_millis() as u64;
+                let cancel_entry = LogEntry::new(
+                    LogLevel::Error,
+                    format!("Scan cancelled before Phase {} started", phase_num),
+                )
+                .with_phase(phase_num)
+                .with_duration(elapsed);
+                ctx_arc.logger.log(cancel_entry);
+                ctx_arc.log(format!("[!] Scan cancelled (Phase {} skipped)", phase_num));
+                break;  // Exit scan loop immediately
+            }
+
+            // Execute phase with both timeout and cancellation protection
+            let result = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    // Cancellation signal received (CTRL+C, Dashboard cancel, cloud kill)
+                    Err::<Vec<ScanFinding>, String>("cancelled".to_string())
+                }
+                result = timeout(phase_timeout, phase.execute(&ctx_arc)) => {
+                    match result {
+                        Ok(Ok(findings)) => Ok(findings),
+                        Ok(Err(e)) => Err(format!("phase error: {}", e)),
+                        Err(_) => Err("timeout".to_string()),
+                    }
+                }
+            };
+
+            match result {
+                Ok(findings) => {
                     let elapsed = start.elapsed().as_millis() as u64;
                     let finding_count = findings.len();
 
@@ -86,23 +116,24 @@ impl ScanRunner {
 
                     all_findings.extend(findings);
                 }
-                Ok(Err(e)) => {
+                Err(e) if e == "cancelled" => {
                     let elapsed = start.elapsed().as_millis() as u64;
 
-                    // Log error with context
-                    let error_entry = LogEntry::new(
+                    // Log cancellation (graceful shutdown)
+                    let cancel_entry = LogEntry::new(
                         LogLevel::Error,
-                        format!("Phase {} failed: {}", phase_num, e),
+                        format!("Phase {} cancelled by user", phase_num),
                     )
                     .with_phase(phase_num)
                     .with_duration(elapsed);
-                    ctx_arc.logger.log(error_entry);
-                    ctx_arc.log(format!("[-] Phase {} error: {:?}", phase_num, e));
+                    ctx_arc.logger.log(cancel_entry);
+                    ctx_arc.log(format!("[!] Phase {} cancelled by user", phase_num));
+                    break;  // Exit scan loop, return partial results
                 }
-                Err(_) => {
+                Err(e) if e == "timeout" => {
                     let elapsed = start.elapsed().as_millis() as u64;
 
-                    // Log timeout with context (CRITICAL: phase exceeded timeout)
+                    // Log timeout (CRITICAL: phase exceeded timeout)
                     let timeout_entry = LogEntry::new(
                         LogLevel::Error,
                         format!("Phase {} timed out after {}s", phase_num, ctx_arc.phase_timeout_secs),
@@ -114,6 +145,19 @@ impl ScanRunner {
                         "[-] Phase {} timeout (exceeded {}s limit)",
                         phase_num, ctx_arc.phase_timeout_secs
                     ));
+                }
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+
+                    // Log error with context
+                    let error_entry = LogEntry::new(
+                        LogLevel::Error,
+                        format!("Phase {} failed: {}", phase_num, e),
+                    )
+                    .with_phase(phase_num)
+                    .with_duration(elapsed);
+                    ctx_arc.logger.log(error_entry);
+                    ctx_arc.log(format!("[-] Phase {} error: {}", phase_num, e));
                 }
             }
         }

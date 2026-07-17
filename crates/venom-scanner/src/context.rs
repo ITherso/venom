@@ -3,6 +3,7 @@ use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use url::Url;
 use crate::logging::{Logger, LogLevel};
+use tokio_util::sync::CancellationToken;
 
 /// Zero-copy shared state across all scan phases
 #[derive(Clone)]
@@ -19,6 +20,8 @@ pub struct ScanContext {
     pub logger: Arc<Logger>,
     // Phase timeout in seconds (prevents single phase from hanging entire scan)
     pub phase_timeout_secs: u64,
+    // Cancellation token for graceful scan cancellation (CTRL+C, Dashboard cancel, cloud kill)
+    pub cancel_token: CancellationToken,
 }
 
 impl ScanContext {
@@ -36,6 +39,16 @@ impl ScanContext {
         telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
         phase_timeout_secs: u64,
     ) -> Self {
+        Self::with_cancellation(target, client, telemetry_tx, phase_timeout_secs, CancellationToken::new())
+    }
+
+    pub fn with_cancellation(
+        target: Url,
+        client: Client,
+        telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        phase_timeout_secs: u64,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             target,
             client: Arc::new(client),
@@ -44,6 +57,7 @@ impl ScanContext {
             telemetry_tx,
             logger: Arc::new(Logger::new(LogLevel::Info)),
             phase_timeout_secs,
+            cancel_token,
         }
     }
 
