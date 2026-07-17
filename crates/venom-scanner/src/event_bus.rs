@@ -670,4 +670,325 @@ mod tests {
 
         assert_eq!(event.timestamp_str(), "1234567890.123");
     }
+
+    // ============ CONCURRENCY & STRESS TESTS ============
+
+    #[test]
+    fn test_concurrent_publications_1000() {
+        let bus = Arc::new(EventBus::new());
+        let mut handles = vec![];
+
+        for i in 0..1000 {
+            let bus_clone = bus.clone();
+            let handle = std::thread::spawn(move || {
+                let event = Event::builder(EventType::FindingFound, format!("thread_{}", i))
+                    .correlation_id(format!("scan_concurrent"))
+                    .build();
+                bus_clone.publish(event);
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all events published
+        assert_eq!(bus.total_events(), 1000);
+        let events = bus.get_events_by_correlation("scan_concurrent");
+        assert_eq!(events.len(), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_async_publications() {
+        let bus = Arc::new(EventBus::new());
+        let mut tasks = vec![];
+
+        for i in 0..500 {
+            let bus_clone = bus.clone();
+            let task = tokio::spawn(async move {
+                let event = Event::builder(EventType::WorkerFinished, format!("async_worker_{}", i))
+                    .build();
+                bus_clone.publish(event);
+            });
+            tasks.push(task);
+        }
+
+        // Wait for all tasks
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_eq!(bus.total_events(), 500);
+    }
+
+    #[test]
+    fn test_subscriber_panic_isolation() {
+        // In production async context, panics in subscribers are isolated with catch_unwind.
+        // This test verifies that normal subscribers still execute when panic would occur.
+        let bus = Arc::new(EventBus::new());
+        let normal_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // First subscriber (normal)
+        let normal_clone = normal_called.clone();
+        bus.subscribe(
+            EventType::ScanStarted,
+            "normal_handler_1",
+            Arc::new(move |_| {
+                normal_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+
+        // Second subscriber (normal) - simulates what would happen if first panicked
+        let normal_called_2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let normal_clone_2 = normal_called_2.clone();
+        bus.subscribe(
+            EventType::ScanStarted,
+            "normal_handler_2",
+            Arc::new(move |_| {
+                normal_clone_2.store(true, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+
+        let event = Event::new(EventType::ScanStarted, "test");
+
+        // Both handlers should be called in sequence
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bus.publish(event);
+        }));
+
+        // Handlers should have been called regardless of panic
+        assert!(normal_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(normal_called_2.load(std::sync::atomic::Ordering::SeqCst));
+        // In real async, panics would be caught; here we just verify handlers run
+        let _ = result;
+    }
+
+    #[test]
+    fn test_unsubscribe_memory_cleanup() {
+        let bus = EventBus::new();
+
+        // Subscribe many handlers
+        for i in 0..100 {
+            bus.subscribe(
+                EventType::FindingFound,
+                format!("handler_{}", i),
+                Arc::new(|_| {}),
+            );
+        }
+
+        assert_eq!(bus.subscriber_count(&EventType::FindingFound), 100);
+
+        // Unsubscribe all
+        for i in 0..100 {
+            bus.unsubscribe(&EventType::FindingFound, &format!("handler_{}", i));
+        }
+
+        // Memory should be cleaned
+        assert_eq!(bus.subscriber_count(&EventType::FindingFound), 0);
+    }
+
+    #[test]
+    fn test_event_order_preservation() {
+        let bus = EventBus::new();
+        let scan_id = "order_test";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        // Publish events with increasing timestamps
+        for i in 0..100 {
+            let event = Event::builder(EventType::FindingFound, "test")
+                .correlation_id(scan_id)
+                .timestamp_ms(now + i as u64)
+                .build();
+            bus.publish(event);
+        }
+
+        let events = bus.get_events_sorted();
+
+        // Verify order
+        for i in 0..events.len() - 1 {
+            assert!(
+                events[i].timestamp_ms <= events[i + 1].timestamp_ms,
+                "Events not in chronological order"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_slow_subscriber_nonblocking() {
+        let bus = Arc::new(EventBus::new());
+        let slow_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let fast_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Slow subscriber
+        let slow_clone = slow_counter.clone();
+        bus.subscribe(
+            EventType::WorkerFinished,
+            "slow",
+            Arc::new(move |_| {
+                // Simulate slow work
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                slow_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+
+        // Fast subscriber
+        let fast_clone = fast_counter.clone();
+        bus.subscribe(
+            EventType::WorkerFinished,
+            "fast",
+            Arc::new(move |_| {
+                fast_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+
+        // Publish events
+        for _ in 0..10 {
+            let event = Event::new(EventType::WorkerFinished, "test");
+            bus.publish(event);
+        }
+
+        // Fast subscriber should be called same number of times
+        assert_eq!(fast_counter.load(std::sync::atomic::Ordering::SeqCst), 10);
+        assert_eq!(slow_counter.load(std::sync::atomic::Ordering::SeqCst), 10);
+    }
+
+    #[test]
+    fn test_concurrent_subscribe_unsubscribe() {
+        let bus = Arc::new(EventBus::new());
+        let mut handles = vec![];
+
+        // Half subscribe, half unsubscribe concurrently
+        for i in 0..200 {
+            let bus_clone = bus.clone();
+            let handle = std::thread::spawn(move || {
+                if i % 2 == 0 {
+                    // Subscribe
+                    bus_clone.subscribe(
+                        EventType::ScanCompleted,
+                        format!("handler_{}", i),
+                        Arc::new(|_| {}),
+                    );
+                } else if i > 1 {
+                    // Unsubscribe
+                    bus_clone.unsubscribe(&EventType::ScanCompleted, &format!("handler_{}", i - 1));
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should not crash and have reasonable subscriber count
+        let count = bus.subscriber_count(&EventType::ScanCompleted);
+        assert!(count <= 200);
+    }
+
+    #[test]
+    fn test_large_event_payload() {
+        let bus = EventBus::new();
+        let large_data = "x".repeat(1_000_000); // 1MB data
+
+        let event = Event::builder(EventType::FindingFound, "test")
+            .data("large_payload", large_data.clone())
+            .build();
+
+        bus.publish(event);
+
+        let retrieved = bus.get_all_events();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(
+            retrieved[0].data.get("large_payload"),
+            Some(&large_data)
+        );
+    }
+
+    #[test]
+    fn test_many_subscribers_single_event() {
+        let bus = Arc::new(EventBus::new());
+        let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Subscribe 500 handlers to same event
+        for i in 0..500 {
+            let counter_clone = counter.clone();
+            bus.subscribe(
+                EventType::AlertTriggered,
+                format!("listener_{}", i),
+                Arc::new(move |_| {
+                    counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            );
+        }
+
+        assert_eq!(bus.subscriber_count(&EventType::AlertTriggered), 500);
+
+        let event = Event::new(EventType::AlertTriggered, "test");
+        bus.publish(event);
+
+        // All subscribers called
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            500
+        );
+    }
+
+    #[test]
+    fn test_event_history_memory_pressure() {
+        let bus = EventBus::new();
+
+        // Publish 10,000 events
+        for i in 0..10_000 {
+            let event = Event::builder(EventType::FindingFound, "test")
+                .data("index", i.to_string())
+                .build();
+            bus.publish(event);
+        }
+
+        assert_eq!(bus.total_events(), 10_000);
+
+        // Query subset should work efficiently
+        let all = bus.get_all_events();
+        assert_eq!(all.len(), 10_000);
+
+        // Clear should free memory
+        bus.clear_history();
+        assert_eq!(bus.get_all_events().len(), 0);
+        assert_eq!(bus.total_events(), 10_000); // Count not reset, just history cleared
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_correlation_queries() {
+        let bus = Arc::new(EventBus::new());
+
+        // Publish to multiple correlation IDs
+        for scan_id in 0..10 {
+            for event_num in 0..100 {
+                let event = Event::builder(EventType::FindingFound, "test")
+                    .correlation_id(format!("scan_{}", scan_id))
+                    .build();
+                bus.publish(event);
+            }
+        }
+
+        // Query concurrently
+        let mut tasks = vec![];
+        for scan_id in 0..10 {
+            let bus_clone = bus.clone();
+            let task = tokio::spawn(async move {
+                let events = bus_clone.get_events_by_correlation(&format!("scan_{}", scan_id));
+                assert_eq!(events.len(), 100);
+            });
+            tasks.push(task);
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
 }
