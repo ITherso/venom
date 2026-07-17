@@ -5,7 +5,8 @@
 
 use crate::{ScanFinding, ScanPhase, context::ScanContext, LogEntry, LogLevel};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, Duration};
+use tokio::time::timeout;
 
 /// Orchestrates multi-phase scanning pipeline
 ///
@@ -62,9 +63,11 @@ impl ScanRunner {
             ctx_arc.logger.log(start_entry);
             ctx_arc.log(format!("[*] Phase {}: {}", phase_num, phase_name));
 
-            // Execute phase with implicit timeout from HTTP client config
-            match phase.execute(&ctx_arc).await {
-                Ok(findings) => {
+            // Execute phase with timeout (CRITICAL: prevent single phase from hanging entire scan)
+            let phase_timeout = Duration::from_secs(ctx_arc.phase_timeout_secs);
+
+            match timeout(phase_timeout, phase.execute(&ctx_arc)).await {
+                Ok(Ok(findings)) => {
                     let elapsed = start.elapsed().as_millis() as u64;
                     let finding_count = findings.len();
 
@@ -83,7 +86,7 @@ impl ScanRunner {
 
                     all_findings.extend(findings);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let elapsed = start.elapsed().as_millis() as u64;
 
                     // Log error with context
@@ -95,6 +98,22 @@ impl ScanRunner {
                     .with_duration(elapsed);
                     ctx_arc.logger.log(error_entry);
                     ctx_arc.log(format!("[-] Phase {} error: {:?}", phase_num, e));
+                }
+                Err(_) => {
+                    let elapsed = start.elapsed().as_millis() as u64;
+
+                    // Log timeout with context (CRITICAL: phase exceeded timeout)
+                    let timeout_entry = LogEntry::new(
+                        LogLevel::Error,
+                        format!("Phase {} timed out after {}s", phase_num, ctx_arc.phase_timeout_secs),
+                    )
+                    .with_phase(phase_num)
+                    .with_duration(elapsed);
+                    ctx_arc.logger.log(timeout_entry);
+                    ctx_arc.log(format!(
+                        "[-] Phase {} timeout (exceeded {}s limit)",
+                        phase_num, ctx_arc.phase_timeout_secs
+                    ));
                 }
             }
         }

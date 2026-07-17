@@ -17,6 +17,8 @@ pub struct ScanContext {
     pub telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
     // Structured logger with filtering and formatting
     pub logger: Arc<Logger>,
+    // Phase timeout in seconds (prevents single phase from hanging entire scan)
+    pub phase_timeout_secs: u64,
 }
 
 impl ScanContext {
@@ -25,6 +27,15 @@ impl ScanContext {
         client: Client,
         telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
     ) -> Self {
+        Self::with_timeout(target, client, telemetry_tx, 300)  // 5 min default
+    }
+
+    pub fn with_timeout(
+        target: Url,
+        client: Client,
+        telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        phase_timeout_secs: u64,
+    ) -> Self {
         Self {
             target,
             client: Arc::new(client),
@@ -32,6 +43,7 @@ impl ScanContext {
             visited_urls: Arc::new(DashSet::new()),
             telemetry_tx,
             logger: Arc::new(Logger::new(LogLevel::Info)),
+            phase_timeout_secs,
         }
     }
 
