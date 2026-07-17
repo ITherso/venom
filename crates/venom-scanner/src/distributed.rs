@@ -99,6 +99,54 @@ impl WorkerNode {
             self.status = WorkerStatus::Healthy;
         }
     }
+
+    /// Production-grade worker selection score
+    /// Considers: status, heartbeat recency, CPU/memory, available capacity
+    /// Higher score = better choice for task assignment
+    pub fn compute_score(&self, now_secs: u64) -> f32 {
+        let mut score = 0.0;
+
+        // 1. Status factor (weight: 25 points) - critical filter
+        let status_score = match self.status {
+            WorkerStatus::Healthy => 25.0,
+            WorkerStatus::Busy => 15.0,
+            WorkerStatus::Degraded => 5.0,
+            WorkerStatus::Offline => return -1000.0,  // Never select
+        };
+        score += status_score;
+
+        // 2. Heartbeat recency (weight: 20 points)
+        // Recent ping = healthy, stale ping = suspect
+        let heartbeat_age = now_secs.saturating_sub(self.last_heartbeat);
+        let heartbeat_score = if heartbeat_age < 5 {
+            20.0  // Fresh heartbeat (< 5s)
+        } else if heartbeat_age < 30 {
+            20.0 * (1.0 - (heartbeat_age as f32 / 30.0) * 0.5)  // Degrade to 10 points at 30s
+        } else {
+            0.0  // Stale (> 30s)
+        };
+        score += heartbeat_score;
+
+        // 3. CPU utilization (weight: 15 points) - lower is better
+        let cpu_score = (100.0 - self.cpu_utilization) / 100.0 * 15.0;
+        score += cpu_score;
+
+        // 4. Memory utilization (weight: 15 points) - lower is better
+        let mem_score = (100.0 - self.memory_utilization) / 100.0 * 15.0;
+        score += mem_score;
+
+        // 5. Available capacity (weight: 25 points) - more slots is better
+        let slots_ratio = if self.capacity > 0 {
+            (self.available_slots() as f32) / (self.capacity as f32)
+        } else {
+            0.0
+        };
+        let capacity_score = slots_ratio * 25.0;
+        score += capacity_score;
+
+        // Total possible: 25 + 20 + 15 + 15 + 25 = 100 points
+        score
+    }
 }
 
 /// Scan task for distributed execution
@@ -237,14 +285,23 @@ impl WorkerPool {
     }
 
     pub fn get_available_worker(&self) -> Option<WorkerNode> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         self.workers
             .iter()
             .filter(|entry| {
                 let worker = entry.value();
-                worker.status == WorkerStatus::Healthy
+                worker.status != WorkerStatus::Offline
                     && worker.available_slots() > 0
             })
-            .min_by_key(|entry| entry.value().current_tasks)
+            .max_by(|a, b| {
+                let a_score = a.value().compute_score(now);
+                let b_score = b.value().compute_score(now);
+                a_score.partial_cmp(&b_score).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|entry| entry.value().clone())
     }
 
@@ -797,5 +854,133 @@ mod tests {
         worker.update_metrics(75.0, 70.0, 65.0);
         worker.compute_status();
         assert_eq!(worker.status, WorkerStatus::Busy);
+    }
+
+    #[test]
+    fn test_worker_score_healthy_fresh() {
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,  // Will be treated as recent in test
+            cpu_utilization: 20.0,  // Good: low utilization
+            memory_utilization: 15.0,
+            network_utilization: 10.0,
+        };
+
+        let now = 1002;  // Just 2 seconds later
+        let score = worker.compute_score(now);
+
+        // Score should be high: Healthy (25) + fresh heartbeat (20) + low CPU (12) + low memory (12.75) + full capacity (25) ≈ 94.75
+        assert!(score > 90.0, "Expected score > 90, got {}", score);
+    }
+
+    #[test]
+    fn test_worker_score_offline_always_lowest() {
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Offline,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 0.0,
+            memory_utilization: 0.0,
+            network_utilization: 0.0,
+        };
+
+        let score = worker.compute_score(1000);
+        assert_eq!(score, -1000.0, "Offline worker should always return -1000");
+    }
+
+    #[test]
+    fn test_worker_score_stale_heartbeat() {
+        let mut healthy = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 20.0,
+            memory_utilization: 15.0,
+            network_utilization: 10.0,
+        };
+
+        let mut stale = healthy.clone();
+        stale.worker_id = "w2".to_string();
+        stale.last_heartbeat = 900;  // 100s old
+
+        let now = 1000;
+        let healthy_score = healthy.compute_score(now);
+        let stale_score = stale.compute_score(now);
+
+        // Healthy has fresh heartbeat (20 points), stale gets 0 points for heartbeat
+        // Difference: 20 points
+        assert!(healthy_score > stale_score + 15.0,
+            "Fresh heartbeat should score significantly higher. healthy={}, stale={}",
+            healthy_score, stale_score);
+    }
+
+    #[test]
+    fn test_worker_score_compare_selection() {
+        let now = 5000;
+
+        let idle_healthy = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,  // Empty
+            completed_tasks: 0,
+            last_heartbeat: 4999,  // Fresh
+            cpu_utilization: 10.0,  // Low
+            memory_utilization: 10.0,
+            network_utilization: 10.0,
+        };
+
+        let busy_health = WorkerNode {
+            worker_id: "w2".to_string(),
+            hostname: "scanner-2".to_string(),
+            address: "192.168.1.20".to_string(),
+            port: 8000,
+            status: WorkerStatus::Busy,
+            capacity: 10,
+            current_tasks: 8,  // Almost full
+            completed_tasks: 0,
+            last_heartbeat: 4995,  // Slightly stale
+            cpu_utilization: 85.0,  // High
+            memory_utilization: 75.0,
+            network_utilization: 60.0,
+        };
+
+        let idle_score = idle_healthy.compute_score(now);
+        let busy_score = busy_health.compute_score(now);
+
+        // Idle should score much higher
+        assert!(idle_score > busy_score + 30.0,
+            "Idle healthy should score > 30 points higher. idle={}, busy={}",
+            idle_score, busy_score);
+
+        // Idle should be selected (higher score)
+        let pool = WorkerPool::new();
+        pool.register_worker(idle_healthy.clone());
+        pool.register_worker(busy_health);
+
+        let selected = pool.get_available_worker();
+        assert_eq!(selected.unwrap().worker_id, "w1");
     }
 }
