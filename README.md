@@ -7,9 +7,9 @@
 
 > **VENOM v1.0.0** — Complete enterprise-grade pentesting platform. MITM proxy + scanner + zero-day engine + post-exploitation + CLI + Web Dashboard + Performance Optimization + Security Hardening + Compliance & Reporting.
 
-**Status:** v1.0.0 PRODUCTION | All Phases Complete | 18,100+ Lines Rust Scanner | 523+ Tests | 34 Modules | Enterprise-Ready
+**Status:** v1.0.0 PRODUCTION | All Phases Complete | 19,100+ Lines Rust Scanner | 573+ Tests | 37 Modules | Enterprise-Ready
 
-**TIER 1-16 ✅ COMPLETE** — Complete Modular Pentesting Powerhouse
+**TIER 1-17 ✅ COMPLETE** — NSE-Style Scriptable Pentesting Powerhouse
 
 **TIER 7: Distributed Scaling ✅ COMPLETE (530 lines, 16 tests):**
 - ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), capacity-based scheduling
@@ -31,6 +31,14 @@
 - ✅ **Plugin Configuration** — Per-plugin timeout, payload size, retry settings, custom options
 - ✅ **Execution Metrics** — Timing, success/error rates, metadata tracking over time
 - ✅ **44 Comprehensive Tests** — 34 unit tests + 10 integration tests covering all plugins and workflows
+
+**TIER 17: NSE-Style Scripting + Event Bus + Config Profiles ✅ COMPLETE (1,100+ lines, 50 tests):**
+- ✅ **Event Bus** — Publish/subscribe for 16 lifecycle events (ScanStarted, FindingFound, WorkerFinished, etc.)
+- ✅ **Lua Script Engine** — LuaScript registry, contexts, execution tracking (NSE-inspired architecture)
+- ✅ **Config Profiles** — 4 built-in profiles (enterprise, cloud, aggressive, passive) with customization
+- ✅ **Event Handlers** — Async callbacks Arc<dyn Fn(&Event)> for non-blocking event processing
+- ✅ **Profile Management** — ConfigLoader with profile merging, active profile tracking, multi-profile orchestration
+- ✅ **50 Comprehensive Tests** — 42 unit tests (12 event + 14 lua + 16 config) + 8 integration tests
 
 **TIER 1 Quality Sprint ✅ COMPLETE (7 Days):**
 - ✅ **Structured Logging System** (227 lines) — LogLevel enum, LogEntry struct, Logger facade with timing metrics, 8 logging tests
@@ -235,7 +243,28 @@ cargo build --release
 | **Statistics Dashboard** | ✅ | Vulnerability counts, success rates, metrics |
 | **Finding Timeline** | ✅ | Detailed discovery dates and progression |
 
-### ✅ TIER 16: Plugin Architecture & Modular Scanners (NEW)
+### ✅ TIER 17: NSE-Style Scripting + Event Bus + Config Profiles (NEW)
+
+**Nmap's NSE-inspired extensibility for enterprise scanning:**
+- 🔔 **Event Bus** — 16 lifecycle events for reactive scanning (ScanStarted, FindingFound, WorkerFinished, etc.)
+  - EventSeverity levels: Debug → Info → Warning → Error → Critical
+  - Event data with key-value metadata
+  - Async handlers: Arc<dyn Fn(&Event)> for non-blocking execution
+- 📜 **Lua Script Engine** — Custom scanning logic via Lua scripts
+  - LuaScript metadata (id, name, version, categories, author, timeout)
+  - LuaContext with target, payload, parameters, execution config
+  - Registry with category filtering and execution history
+  - Script lifecycle: Loaded → Running → Completed/Failed/Timeout
+- ⚙️ **Config Profiles** — Pre-configured scanning strategies
+  - **Enterprise**: Compliance-focused, Light intensity, detailed reporting
+  - **Cloud**: AWS/GCP/Azure detection, 16 concurrent workers
+  - **Aggressive**: All plugins enabled, 32 workers, WAF bypass active
+  - **Passive**: Stealth-only, 0 invasive payloads
+  - Profile merging for custom configurations
+- 📊 **Metrics** — Event history, execution tracking, performance stats
+- ✅ **50 Tests** — 42 unit + 8 integration tests covering all workflows
+
+### ✅ TIER 16: Plugin Architecture & Modular Scanners
 
 **Comprehensive plugin-based vulnerability scanning:**
 - 🔌 **Async Plugin Trait** — Metadata, validation, config, execution with async/await
@@ -621,13 +650,13 @@ venom/
 
 **Stats:**
 - **Language:** Rust (2021 edition) + React/TypeScript
-- **Total Lines of Code:** 21,100+ lines
-  - Backend (Rust): 18,100+ lines (scanner + 16 TIERs complete)
+- **Total Lines of Code:** 22,100+ lines
+  - Backend (Rust): 19,100+ lines (scanner + 17 TIERs complete)
   - Frontend (React/TypeScript): 3,000+ lines
-- **Total Test Cases:** 523+ comprehensive tests (100% passing)
-  - Unit tests: 223 tests (all core modules)
-  - Integration tests: 300 tests (TIER 7-16 + phases)
-- **Modules:** 34 core scanner modules (8 plugin modules + 26 base) + 33+ platform modules
+- **Total Test Cases:** 573+ comprehensive tests (100% passing)
+  - Unit tests: 264 tests (all core modules)
+  - Integration tests: 309 tests (TIER 7-17 + phases)
+- **Modules:** 37 core scanner modules (3 extensibility + 8 plugin + 26 base) + 33+ platform modules
 - **CLI Commands:** 40+
 - **Concurrent Workers:** 
   - Single node: 100+ concurrent requests (Tokio async)
