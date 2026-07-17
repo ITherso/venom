@@ -38,6 +38,8 @@ pub enum EventType {
     PhaseStarted,
     #[serde(rename = "phase_completed")]
     PhaseCompleted,
+    #[serde(rename = "phase_failed")]
+    PhaseFailed,
     #[serde(rename = "alert_triggered")]
     AlertTriggered,
     #[serde(rename = "config_reloaded")]
@@ -61,6 +63,7 @@ impl EventType {
             EventType::PluginExecuted => "plugin_executed",
             EventType::PhaseStarted => "phase_started",
             EventType::PhaseCompleted => "phase_completed",
+            EventType::PhaseFailed => "phase_failed",
             EventType::AlertTriggered => "alert_triggered",
             EventType::ConfigReloaded => "config_reloaded",
         }

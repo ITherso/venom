@@ -3,6 +3,7 @@ use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use url::Url;
 use crate::logging::{Logger, LogLevel};
+use crate::event_bus::EventBus;
 use tokio_util::sync::CancellationToken;
 
 /// Zero-copy shared state across all scan phases
@@ -22,6 +23,8 @@ pub struct ScanContext {
     pub phase_timeout_secs: u64,
     // Cancellation token for graceful scan cancellation (CTRL+C, Dashboard cancel, cloud kill)
     pub cancel_token: CancellationToken,
+    // Event bus for publishing progress events (PhaseStarted, PhaseCompleted, PhaseFailed)
+    pub event_bus: Arc<EventBus>,
 }
 
 impl ScanContext {
@@ -49,6 +52,17 @@ impl ScanContext {
         phase_timeout_secs: u64,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::with_event_bus(target, client, telemetry_tx, phase_timeout_secs, cancel_token, Arc::new(EventBus::new()))
+    }
+
+    pub fn with_event_bus(
+        target: Url,
+        client: Client,
+        telemetry_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        phase_timeout_secs: u64,
+        cancel_token: CancellationToken,
+        event_bus: Arc<EventBus>,
+    ) -> Self {
         Self {
             target,
             client: Arc::new(client),
@@ -58,6 +72,7 @@ impl ScanContext {
             logger: Arc::new(Logger::new(LogLevel::Info)),
             phase_timeout_secs,
             cancel_token,
+            event_bus,
         }
     }
 

@@ -3,7 +3,7 @@
 //! The ScanRunner coordinates sequential execution of all 9 scanning phases,
 //! manages error handling, and aggregates findings with timing metrics.
 
-use crate::{ScanFinding, ScanPhase, context::ScanContext, LogEntry, LogLevel};
+use crate::{ScanFinding, ScanPhase, context::ScanContext, LogEntry, LogLevel, Event, EventType};
 use std::sync::Arc;
 use std::time::{Instant, Duration};
 use tokio::time::timeout;
@@ -63,6 +63,13 @@ impl ScanRunner {
             ctx_arc.logger.log(start_entry);
             ctx_arc.log(format!("[*] Phase {}: {}", phase_num, phase_name));
 
+            // Publish PhaseStarted event for real-time dashboard updates
+            let start_event = Event::builder(EventType::PhaseStarted, format!("Phase {}", phase_num))
+                .data("phase_number", phase_num.to_string())
+                .data("phase_name", phase_name.to_string())
+                .build();
+            ctx_arc.event_bus.publish(start_event);
+
             // Execute phase with timeout + cancellation (CRITICAL: prevent hangs, allow graceful stop)
             let phase_timeout = Duration::from_secs(ctx_arc.phase_timeout_secs);
             let cancel_token = ctx_arc.cancel_token.clone();
@@ -114,6 +121,15 @@ impl ScanRunner {
                         phase_num, finding_count, elapsed
                     ));
 
+                    // Publish PhaseCompleted event for real-time dashboard updates
+                    let complete_event = Event::builder(EventType::PhaseCompleted, format!("Phase {}", phase_num))
+                        .data("phase_number", phase_num.to_string())
+                        .data("phase_name", phase_name.to_string())
+                        .data("finding_count", finding_count.to_string())
+                        .data("elapsed_ms", elapsed.to_string())
+                        .build();
+                    ctx_arc.event_bus.publish(complete_event);
+
                     all_findings.extend(findings);
                 }
                 Err(e) if e == "cancelled" => {
@@ -128,6 +144,16 @@ impl ScanRunner {
                     .with_duration(elapsed);
                     ctx_arc.logger.log(cancel_entry);
                     ctx_arc.log(format!("[!] Phase {} cancelled by user", phase_num));
+
+                    // Publish PhaseFailed event for dashboard
+                    let cancel_event = Event::builder(EventType::PhaseFailed, format!("Phase {}", phase_num))
+                        .data("phase_number", phase_num.to_string())
+                        .data("phase_name", phase_name.to_string())
+                        .data("reason", "cancelled")
+                        .data("elapsed_ms", elapsed.to_string())
+                        .build();
+                    ctx_arc.event_bus.publish(cancel_event);
+
                     break;  // Exit scan loop, return partial results
                 }
                 Err(e) if e == "timeout" => {
@@ -145,6 +171,16 @@ impl ScanRunner {
                         "[-] Phase {} timeout (exceeded {}s limit)",
                         phase_num, ctx_arc.phase_timeout_secs
                     ));
+
+                    // Publish PhaseFailed event for dashboard
+                    let timeout_event = Event::builder(EventType::PhaseFailed, format!("Phase {}", phase_num))
+                        .data("phase_number", phase_num.to_string())
+                        .data("phase_name", phase_name.to_string())
+                        .data("reason", "timeout")
+                        .data("timeout_secs", ctx_arc.phase_timeout_secs.to_string())
+                        .data("elapsed_ms", elapsed.to_string())
+                        .build();
+                    ctx_arc.event_bus.publish(timeout_event);
                 }
                 Err(e) => {
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -158,6 +194,16 @@ impl ScanRunner {
                     .with_duration(elapsed);
                     ctx_arc.logger.log(error_entry);
                     ctx_arc.log(format!("[-] Phase {} error: {}", phase_num, e));
+
+                    // Publish PhaseFailed event for dashboard
+                    let error_event = Event::builder(EventType::PhaseFailed, format!("Phase {}", phase_num))
+                        .data("phase_number", phase_num.to_string())
+                        .data("phase_name", phase_name.to_string())
+                        .data("reason", "error")
+                        .data("error", e.clone())
+                        .data("elapsed_ms", elapsed.to_string())
+                        .build();
+                    ctx_arc.event_bus.publish(error_event);
                 }
             }
         }
