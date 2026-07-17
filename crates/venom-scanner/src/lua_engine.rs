@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// Lua script metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaScript {
-    pub id: String,
+    pub id: Uuid,  // Unique identifier (prevents duplicate xss.lua conflicts)
     pub name: String,
     pub version: String,
     pub description: String,
@@ -22,9 +23,9 @@ pub struct LuaScript {
 }
 
 impl LuaScript {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, script_path: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, script_path: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
+            id: Uuid::new_v4(),  // Auto-generate unique ID
             name: name.into(),
             version: "1.0.0".to_string(),
             description: String::new(),
