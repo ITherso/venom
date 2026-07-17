@@ -60,7 +60,7 @@
 
 ---
 
-**TIER 7: Distributed Scaling ✅ COMPLETE (1,110+ lines, 35 tests):**
+**TIER 7: Distributed Scaling ✅ COMPLETE (1,337+ lines, 40 tests):**
 - ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), dynamic capacity based on CPU/RAM/Network utilization
 - ✅ **Dynamic Capacity** — effective_capacity() = base * (1 - max(cpu%, mem%, net%)/100), prevents overloading saturated workers
 - ✅ **Resource Metrics** — CPU/memory/network utilization tracking, auto-status transitions (Healthy→Busy→Degraded at utilization thresholds)
@@ -68,9 +68,10 @@
 - ✅ **Task Queueing System** — Priority-based task queue (FIFO per priority), lifecycle management (Queued→Running→Completed)
 - ✅ **Worker Pool Orchestration** — Multi-factor load balancing, intelligent task assignment via scoring, completion tracking
 - ✅ **Automatic Retry Queue** — retry_count tracking, transparent retry on transient failures (max 3 attempts), requeue to different worker
+- ✅ **Task TTL Expiration** — is_expired(ttl_secs) checking, periodic cleanup of zombie tasks, worker capacity reclamation
 - ✅ **Result Aggregation** — Distributed result collection and combination from multiple workers
 - ✅ **Heartbeat Monitoring** — Worker health validation with timeout-based pruning of dead nodes
-- ✅ **35 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, scoring, retry progression, resource-aware scheduling, heartbeat monitoring
+- ✅ **40 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, scoring, retry progression, TTL expiration, resource-aware scheduling, heartbeat monitoring
 
 **TIER 8: ML Integration ✅ COMPLETE (538 lines, 23 tests):**
 - ✅ **Pattern Learning** — VulnerabilityPattern registration, k-means clustering, signature-based grouping
@@ -543,7 +544,121 @@ Task t1 assigned to Worker W1
 
 ---
 
-### 13. Runner Hardening (v0.9.0+)
+### 10. Task TTL (P2 - Resource Cleanup)
+
+**Problem (NEW v0.9.0+)**
+- ⚠️ **ZOMBIE TASKS:** Tasks can queue indefinitely
+  - Task created → assigned to Worker W1
+  - W1 crashes (removed from pool)
+  - Task stuck in Queued state forever
+  - Zombie accumulates, memory leak
+  - Coordinator never retries (no worker available)
+
+**Solution: Task TTL (Time To Live)**
+- Add `is_expired(now, ttl_secs)` check to ScanTask
+- Coordinator calls `expire_old_tasks(ttl_secs)` periodically
+- Tasks exceeding TTL marked Failed automatically
+- Worker capacity reclaimed
+
+**Implementation:**
+
+```rust
+impl ScanTask {
+    pub fn is_expired(&self, now_secs: u64, ttl_secs: u64) -> bool {
+        let age = now - created_at;
+        age > ttl_secs
+    }
+    
+    pub fn age_secs(&self, now_secs: u64) -> u64 {
+        now - created_at
+    }
+}
+
+impl WorkerPool {
+    pub fn expire_old_tasks(&self, ttl_secs: u64) -> usize {
+        let now = SystemTime::now().as_secs();
+        let mut expired = 0;
+        
+        for task in all_tasks:
+            if task.is_expired(now, ttl_secs) && !task.is_terminal():
+                // Release worker if assigned
+                if let Some(worker_id) = task.assigned_to:
+                    worker[worker_id].current_tasks--
+                
+                // Mark failed
+                task.status = Failed
+                task.completed_at = now
+                expired += 1
+        
+        expired
+    }
+}
+```
+
+**Coordinator Usage:**
+
+```rust
+let task_ttl_secs = 86400;  // 24 hours
+
+loop {
+    // Expire old tasks (every 60 seconds)
+    let expired = pool.expire_old_tasks(task_ttl_secs);
+    if expired > 0 {
+        log!("Expired {} old tasks", expired);
+    }
+    
+    // Normal operations
+    if let Some(task) = pool.dequeue_task() { ... }
+    
+    tokio::time::sleep(Duration::from_secs(60)).await;
+}
+```
+
+**TTL Values by Environment:**
+
+| Environment | TTL | Reasoning |
+|-------------|-----|-----------|
+| Local dev | 1 hour | Fast feedback |
+| CI/Testing | 4 hours | Build pipelines slow |
+| Production | 24 hours | Normal SLAs |
+| Cloud | 12 hours | Instance restart risks |
+
+**Timeline Example:**
+
+```
+Without TTL:
+  t=0s:    Task created (assigned to W1)
+  t=1h:    W1 crashes → no more heartbeats
+  t=24h:   Task still in queue (ZOMBIE)
+  t=1y:    Task still there (memory leak!)
+
+With TTL (24h):
+  t=0s:    Task created (assigned to W1)
+  t=1h:    W1 crashes → no more heartbeats
+  t=24h+1s: expire_old_tasks() called
+           is_expired(now, 86400)? YES
+           Status → Failed
+           Worker freed
+           Task cleaned up (no leak)
+```
+
+**Test Coverage (5 tests):**
+- ✅ test_task_is_expired_fresh — 1h old, TTL 24h → not expired
+- ✅ test_task_is_expired_exceeded — 3 days old, TTL 24h → expired
+- ✅ test_task_age_secs — Verify age calculation
+- ✅ test_expire_old_tasks — Pool with fresh + old → only old expires
+- ✅ test_expire_tasks_release_worker — Assigned task → worker freed
+
+**Impact:**
+- ✅ No zombie tasks accumulating
+- ✅ Memory leak prevented
+- ✅ Worker capacity reclaimed automatically
+- ✅ Configurable per deployment
+- ✅ Especially valuable for: long-running scanners, worker crashes, partial assignments
+
+---
+
+### 11. Runner Hardening (v0.9.0+)
 
 **Timeout Enforcement (P0 Fix)**
 - Phase hangs → 5-min timeout enforced
@@ -586,7 +701,7 @@ Task t1 assigned to Worker W1
 - Independent phases (Banner/Port/DNS) run concurrently
 - 30-50% speedup for typical scans
 
-### 13. Module Sizing Policy
+### 12. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -612,7 +727,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 13. Event Envelope Pattern (Future Dashboard)
+### 14. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
