@@ -219,7 +219,59 @@ Initialized
 
 **Current Gap:** 29 tests → Need 48+ tests (6 phases × 8 scenarios)
 
-### 6. Runner Hardening (v0.9.0+)
+### 6. Distributed Worker Health Monitoring (P0 Critical)
+
+**Heartbeat Validation (NEW v0.9.0+)**
+- ⚠️ **PROBLEM:** WorkerNode.last_heartbeat existed but was never validated
+- ⚠️ **IMPACT:** Dead workers stayed marked Healthy → Tasks assigned to offline nodes → Deadlock
+- ✅ **SOLUTION:** Added heartbeat monitoring infrastructure:
+
+```rust
+// Update heartbeat when worker sends ping
+pub fn update_heartbeat(&self, worker_id: &str);
+
+// CRITICAL: Prune dead workers every 10s
+pub fn prune_dead_workers(&self, heartbeat_timeout_secs: u64) -> usize;
+
+// Get only alive workers (filters Offline nodes)
+pub fn get_alive_workers(&self) -> Vec<WorkerNode>;
+```
+
+**Usage Pattern:**
+```rust
+// Coordinator loop (every 10 seconds)
+loop {
+    let dead = pool.prune_dead_workers(30);  // 30s heartbeat timeout
+    if dead > 0 {
+        log!("Pruned {} dead workers", dead);
+    }
+    
+    // Assign tasks only to alive workers
+    if let Some(worker) = pool.get_available_worker() {
+        pool.assign_task(task_id, &worker.worker_id);
+    }
+}
+
+// Worker heartbeat (periodic ping from worker)
+worker.send_heartbeat() -> {
+    coordinator.update_heartbeat(worker_id);
+}
+```
+
+**Test Coverage (4 tests):**
+- ✅ test_update_heartbeat — Verify timestamp update
+- ✅ test_prune_dead_workers — All 3 stale workers marked Offline
+- ✅ test_prune_preserves_recent — Only dead ones pruned, healthy preserved
+- ✅ test_get_alive_workers — Filter only Healthy, exclude Offline
+
+**Impact:**
+- ✅ Prevents task deadlock from dead workers
+- ✅ Enables health monitoring dashboards
+- ✅ Critical for Tier 7 (Distributed Scaling) production use
+
+---
+
+### 7. Runner Hardening (v0.9.0+)
 
 **Timeout Enforcement (P0 Fix)**
 - Phase hangs → 5-min timeout enforced
@@ -262,7 +314,7 @@ Initialized
 - Independent phases (Banner/Port/DNS) run concurrently
 - 30-50% speedup for typical scans
 
-### 7. Module Sizing Policy
+### 8. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -271,7 +323,7 @@ Initialized
 
 **Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
 
-### 8. Config Validation (Enforce at Construction)
+### 9. Config Validation (Enforce at Construction)
 **Pattern: TryFrom with Serde**
 ```rust
 #[serde(try_from = "RawConfig")]
@@ -288,7 +340,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 9. Event Envelope Pattern (Future Dashboard)
+### 10. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
