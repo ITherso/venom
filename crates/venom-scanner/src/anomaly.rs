@@ -150,6 +150,82 @@ pub struct AnomalyScore {
     pub combined_score: f32,
 }
 
+/// Status code whitelist for anomaly detection (P1 - Flexible status handling)
+///
+/// Allows multiple "normal" status codes instead of single expected_status.
+/// Redirects (301, 302, 307, 308) are normal and shouldn't trigger anomalies.
+/// Other normal codes (200, 304, etc.) can be whitelisted.
+///
+/// # Example
+/// ```ignore
+/// let whitelist = StatusWhitelist::new(vec![200, 301, 302, 307, 308, 304]);
+/// whitelist.is_normal(200)   // true
+/// whitelist.is_normal(301)   // true (redirect)
+/// whitelist.is_normal(500)   // false
+/// whitelist.is_normal(403)   // false (unless whitelisted)
+/// ```
+#[derive(Debug, Clone)]
+pub struct StatusWhitelist {
+    /// Whitelisted status codes
+    codes: std::collections::HashSet<u16>,
+}
+
+impl StatusWhitelist {
+    /// Create whitelist with specific status codes
+    pub fn new(codes: Vec<u16>) -> Self {
+        Self {
+            codes: codes.into_iter().collect(),
+        }
+    }
+
+    /// Create whitelist with common "normal" responses (P1 - Production ready)
+    pub fn common() -> Self {
+        Self::new(vec![
+            200, // OK
+            201, // Created
+            204, // No Content
+            301, // Moved Permanently (redirect)
+            302, // Found (redirect)
+            304, // Not Modified
+            307, // Temporary Redirect
+            308, // Permanent Redirect
+        ])
+    }
+
+    /// Create whitelist with strict mode (200 only)
+    pub fn strict() -> Self {
+        Self::new(vec![200])
+    }
+
+    /// Check if status code is whitelisted (normal)
+    pub fn is_normal(&self, status: u16) -> bool {
+        self.codes.contains(&status)
+    }
+
+    /// Add status code to whitelist (P1 - Runtime adjustable)
+    pub fn add(&mut self, status: u16) {
+        self.codes.insert(status);
+    }
+
+    /// Remove status code from whitelist
+    pub fn remove(&mut self, status: u16) {
+        self.codes.remove(&status);
+    }
+
+    /// Get all whitelisted codes
+    pub fn codes(&self) -> Vec<u16> {
+        let mut codes: Vec<_> = self.codes.iter().copied().collect();
+        codes.sort();
+        codes
+    }
+}
+
+impl Default for StatusWhitelist {
+    fn default() -> Self {
+        Self::common()
+    }
+}
+
 /// Statistical baseline for comparison (P0 - Outlier-resistant)
 ///
 /// Uses median and MAD instead of mean/stddev:
@@ -181,7 +257,7 @@ pub struct Baseline {
     pub std_dev_size: f32,
 }
 
-/// Anomaly detector for response analysis (P0 - Sliding window for performance)
+/// Anomaly detector for response analysis (P0+P1 - Sliding window + status whitelist)
 pub struct AnomalyDetector {
     /// Baseline for comparison
     baseline: Option<Baseline>,
@@ -189,6 +265,8 @@ pub struct AnomalyDetector {
     responses: std::collections::VecDeque<ResponseData>,
     /// Maximum responses to keep in sliding window (default 100)
     window_size: usize,
+    /// Whitelisted status codes (P1 - allows 301/302 redirects as normal)
+    status_whitelist: StatusWhitelist,
 }
 
 /// Response data for analysis (P1 - Includes body for regex keyword matching)
@@ -202,7 +280,7 @@ pub struct ResponseData {
 }
 
 impl AnomalyDetector {
-    /// Creates a new anomaly detector (default window_size = 100)
+    /// Creates a new anomaly detector (default window_size = 100, common status codes)
     pub fn new() -> Self {
         Self::with_window_size(100)
     }
@@ -213,7 +291,28 @@ impl AnomalyDetector {
             baseline: None,
             responses: std::collections::VecDeque::with_capacity(window_size),
             window_size,
+            status_whitelist: StatusWhitelist::default(),
         }
+    }
+
+    /// Creates a new anomaly detector with custom window size and status whitelist (P1)
+    pub fn with_window_and_whitelist(window_size: usize, whitelist: StatusWhitelist) -> Self {
+        Self {
+            baseline: None,
+            responses: std::collections::VecDeque::with_capacity(window_size),
+            window_size,
+            status_whitelist: whitelist,
+        }
+    }
+
+    /// Set status whitelist (P1 - Runtime configurable)
+    pub fn set_status_whitelist(&mut self, whitelist: StatusWhitelist) {
+        self.status_whitelist = whitelist;
+    }
+
+    /// Get status whitelist reference
+    pub fn status_whitelist(&self) -> &StatusWhitelist {
+        &self.status_whitelist
     }
 
     /// Records a response for baseline learning (P0 - Maintains sliding window)
@@ -339,7 +438,9 @@ impl AnomalyDetector {
         let size_anomaly = self.calculate_size_anomaly(response, baseline);
         // P1: Use regex matcher for flexible error detection
         let error_anomaly = if matcher.contains_error(&response.body) { 0.5 } else { 0.0 };
-        let status_anomaly = if response.status != baseline.expected_status { 0.3 } else { 0.0 };
+        // P1: Use status whitelist instead of single expected_status
+        // Allows redirects (301, 302, 307, 308) and other normal codes
+        let status_anomaly = if !self.status_whitelist.is_normal(response.status) { 0.3 } else { 0.0 };
 
         let combined_score = (timing_anomaly * 0.3
             + size_anomaly * 0.3
@@ -1111,5 +1212,187 @@ mod tests {
         assert!(matcher.contains_error("[Errno 404]"));
         assert!(matcher.contains_error("Traceback (most recent call last): File \"app.py\", line 42, in <module>"));
         assert!(matcher.contains_error("at com.app.UserService.getUser(UserService.java:100)"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // STATUS CODE WHITELIST TESTS (P1 - Flexible status handling)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_status_whitelist_creation() {
+        let whitelist = StatusWhitelist::new(vec![200, 301, 302]);
+        assert!(whitelist.is_normal(200));
+        assert!(whitelist.is_normal(301));
+        assert!(whitelist.is_normal(302));
+        assert!(!whitelist.is_normal(404));
+    }
+
+    #[test]
+    fn test_status_whitelist_common() {
+        let whitelist = StatusWhitelist::common();
+        // Should allow common success and redirect codes
+        assert!(whitelist.is_normal(200), "200 OK");
+        assert!(whitelist.is_normal(201), "201 Created");
+        assert!(whitelist.is_normal(204), "204 No Content");
+        assert!(whitelist.is_normal(301), "301 Redirect");
+        assert!(whitelist.is_normal(302), "302 Redirect");
+        assert!(whitelist.is_normal(304), "304 Not Modified");
+        assert!(whitelist.is_normal(307), "307 Redirect");
+        assert!(whitelist.is_normal(308), "308 Redirect");
+
+        // Should NOT allow error codes
+        assert!(!whitelist.is_normal(400), "400 Bad Request");
+        assert!(!whitelist.is_normal(403), "403 Forbidden");
+        assert!(!whitelist.is_normal(500), "500 Server Error");
+    }
+
+    #[test]
+    fn test_status_whitelist_strict() {
+        let whitelist = StatusWhitelist::strict();
+        assert!(whitelist.is_normal(200), "Only 200 allowed");
+        assert!(!whitelist.is_normal(201), "201 not allowed in strict mode");
+        assert!(!whitelist.is_normal(301), "Redirects not allowed in strict mode");
+    }
+
+    #[test]
+    fn test_status_whitelist_runtime_add_remove() {
+        let mut whitelist = StatusWhitelist::new(vec![200]);
+        assert!(whitelist.is_normal(200));
+        assert!(!whitelist.is_normal(301));
+
+        // Add 301
+        whitelist.add(301);
+        assert!(whitelist.is_normal(301), "Should allow 301 after add");
+
+        // Remove 200
+        whitelist.remove(200);
+        assert!(!whitelist.is_normal(200), "Should not allow 200 after remove");
+    }
+
+    #[test]
+    fn test_status_whitelist_codes_getter() {
+        let whitelist = StatusWhitelist::new(vec![200, 404, 301]);
+        let codes = whitelist.codes();
+        assert_eq!(codes, vec![200, 301, 404], "Codes should be sorted");
+    }
+
+    #[test]
+    fn test_anomaly_detector_with_status_whitelist() {
+        let mut detector = AnomalyDetector::new();
+        let whitelist = StatusWhitelist::new(vec![200, 301, 302]);
+        detector.set_status_whitelist(whitelist);
+
+        let matcher = ErrorKeywordMatcher::default();
+
+        // Build baseline with 200 OK
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            });
+        }
+
+        // 301 should NOT be anomalous (whitelisted)
+        let redirect = ResponseData {
+            status: 301,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: String::new(),
+        };
+        let score = detector.analyze(&redirect, &matcher);
+        assert_eq!(score.status_anomaly, 0.0, "301 redirect should not be anomalous");
+
+        // 404 should be anomalous (not whitelisted)
+        let not_found = ResponseData {
+            status: 404,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: String::new(),
+        };
+        let score = detector.analyze(&not_found, &matcher);
+        assert!(score.status_anomaly > 0.0, "404 should be anomalous when not whitelisted");
+    }
+
+    #[test]
+    fn test_anomaly_detector_redirects_allowed() {
+        // Scenario: API returns redirects as normal behavior
+        let mut detector = AnomalyDetector::new();
+        let redirect_friendly_whitelist = StatusWhitelist::new(vec![200, 301, 302, 307, 308]);
+        detector.set_status_whitelist(redirect_friendly_whitelist);
+
+        let matcher = ErrorKeywordMatcher::default();
+
+        // Build baseline
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            });
+        }
+
+        // All redirect codes should be normal (P1 - Flexible)
+        for status in &[301, 302, 307, 308] {
+            let response = ResponseData {
+                status: *status,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            };
+            let score = detector.analyze(&response, &matcher);
+            assert_eq!(score.status_anomaly, 0.0,
+                "Status {} should be normal with redirect whitelist", status);
+        }
+    }
+
+    #[test]
+    fn test_anomaly_detector_strict_mode() {
+        // Scenario: Strict detection - only 200 allowed
+        let mut detector = AnomalyDetector::new();
+        detector.set_status_whitelist(StatusWhitelist::strict());
+
+        let matcher = ErrorKeywordMatcher::default();
+
+        // Build baseline
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            });
+        }
+
+        // 201 should be anomalous in strict mode
+        let created = ResponseData {
+            status: 201,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: String::new(),
+        };
+        let score = detector.analyze(&created, &matcher);
+        assert!(score.status_anomaly > 0.0, "201 should be anomalous in strict mode");
+
+        // 301 should be anomalous in strict mode
+        let redirect = ResponseData {
+            status: 301,
+            content_length: 1000,
+            elapsed_ms: 100,
+            body: String::new(),
+        };
+        let score = detector.analyze(&redirect, &matcher);
+        assert!(score.status_anomaly > 0.0, "301 should be anomalous in strict mode");
+    }
+
+    #[test]
+    fn test_status_whitelist_default() {
+        let whitelist = StatusWhitelist::default();
+        assert_eq!(whitelist.codes().len(), 8, "Default should have 8 common codes");
+        assert!(whitelist.is_normal(200));
+        assert!(whitelist.is_normal(301));
+        assert!(whitelist.is_normal(307));
     }
 }
