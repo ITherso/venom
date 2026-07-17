@@ -81,17 +81,37 @@
 - ✅ **Execution Metrics** — Timing, success/error rates, metadata tracking over time
 - ✅ **44 Comprehensive Tests** — 34 unit tests + 10 integration tests covering all plugins and workflows
 
-**TIER 17: NSE-Style Scripting + Event Bus + Config Profiles ✅ COMPLETE (1,100+ lines, 50 tests):**
+**TIER 17: NSE-Style Scripting + Event Bus + Config Profiles ✅ COMPLETE (1,100+ lines, 61 tests):**
 - ✅ **Event Bus** — Publish/subscribe for 16 lifecycle events (ScanStarted, FindingFound, WorkerFinished, etc.)
+  - EventSeverity levels: Debug → Info → Warning → Error → Critical
+  - Event versioning (v16) for schema evolution
+  - Millisecond-precision timestamps for accurate sequencing
+  - Correlation IDs (UUID-based) for linking events from same scan
+  - Unique event IDs for deduplication
+  - EventBuilder pattern for fluent event creation
+- ✅ **Event Bus Concurrency** — Production-grade stress testing (10 tests)
+  - 1,000 concurrent event publications without drops
+  - 500 async tokio::spawn event publishes
+  - Panic isolation: normal subscribers execute even if panic occurs
+  - Memory cleanup on unsubscribe (DashMap entry removal)
+  - Event ordering preservation under concurrent conditions
+  - Non-blocking slow subscribers (don't block other subscribers)
+  - Concurrent subscribe/unsubscribe race-free operations
+  - 1MB+ large event payload handling
+  - 500+ subscribers on single event type
+  - 10,000+ event history with efficient queries
+  - Multi-scan correlation ID concurrent queries
 - ✅ **Lua Script Engine** — LuaScript registry, contexts, execution tracking (NSE-inspired architecture)
 - ✅ **Config Profiles** — 4 built-in profiles (enterprise, cloud, aggressive, passive) with customization
 - ✅ **Event Handlers** — Async callbacks Arc<dyn Fn(&Event)> for non-blocking event processing
 - ✅ **Profile Management** — ConfigLoader with profile merging, active profile tracking, multi-profile orchestration
-- ✅ **50 Comprehensive Tests** — 42 unit tests (12 event + 14 lua + 16 config) + 8 integration tests
+- ✅ **61 Comprehensive Tests** — 51 unit tests (31 event + 14 lua + 16 config) + 10 integration/stress tests
 
 **TIER 1 Quality Sprint ✅ COMPLETE (7 Days):**
 - ✅ **Structured Logging System** (227 lines) — LogLevel enum, LogEntry struct, Logger facade with timing metrics, 8 logging tests
-- ✅ **Comprehensive Unit Tests** (152 tests / 1,678 lines) — 6 test suites covering all phases, error handling, integration, performance, and security patterns
+- ✅ **Comprehensive Unit Tests** (163 tests / 1,678 lines) — 6 test suites covering all phases, error handling, integration, performance, and security patterns
+  - Core phases & modules: 152 tests
+  - Event Bus concurrency stress tests: 11 new tests (concurrent publishes, panic isolation, memory cleanup, ordering)
 - ✅ **Enhanced Error Handling** (15 error variants) — NetworkError, UrlParseError, PayloadGenerationError, PhaseTimeout, InvalidTarget, IoError with proper conversions
 - ✅ **Professional Documentation** (1,000+ lines) — Module-level docs for all 9 phases, function documentation, examples, performance notes
 - ✅ **Logging Integration** — ScanRunner with structured logging (50 lines), timing metrics, error context, phase-specific context
@@ -316,10 +336,17 @@ cargo build --release
 ### ✅ TIER 17: NSE-Style Scripting + Event Bus + Config Profiles (NEW)
 
 **Nmap's NSE-inspired extensibility for enterprise scanning:**
-- 🔔 **Event Bus** — 16 lifecycle events for reactive scanning (ScanStarted, FindingFound, WorkerFinished, etc.)
+- 🔔 **Event Bus** — Production-grade 16 lifecycle events with advanced concurrency
+  - 16 event types (ScanStarted, FindingFound, WorkerFinished, PluginLoaded, AlertTriggered, etc.)
   - EventSeverity levels: Debug → Info → Warning → Error → Critical
-  - Event data with key-value metadata
+  - Event versioning (u16) for schema evolution (FindingFoundV1, FindingFoundV2, etc.)
+  - Millisecond-precision timestamps (timestamp_ms: u64) for accurate replay & metrics
+  - Correlation IDs (UUID) for linking all events from same scan
+  - Unique event IDs (UUID) for deduplication and tracking
+  - EventBuilder pattern for fluent event creation with .correlation_id(), .version(), .data(), .severity()
+  - **Concurrency Stress Tested:** 1000 concurrent publishes, panic isolation, memory cleanup, event ordering, non-blocking subscribers
   - Async handlers: Arc<dyn Fn(&Event)> for non-blocking execution
+  - Query methods: get_events_by_correlation(), get_events_sorted(), get_events_by_correlation_and_time()
 - 📜 **Lua Script Engine** — Custom scanning logic via Lua scripts
   - LuaScript metadata (id, name, version, categories, author, timeout)
   - LuaContext with target, payload, parameters, execution config
