@@ -60,14 +60,16 @@
 
 ---
 
-**TIER 7: Distributed Scaling ✅ COMPLETE (730+ lines, 25 tests):**
+**TIER 7: Distributed Scaling ✅ COMPLETE (920+ lines, 30 tests):**
 - ✅ **WorkerNode Management** — Health status tracking (Healthy/Busy/Degraded/Offline), dynamic capacity based on CPU/RAM/Network utilization
 - ✅ **Dynamic Capacity** — effective_capacity() = base * (1 - max(cpu%, mem%, net%)/100), prevents overloading saturated workers
 - ✅ **Resource Metrics** — CPU/memory/network utilization tracking, auto-status transitions (Healthy→Busy→Degraded at utilization thresholds)
+- ✅ **Worker Selection Scoring** — compute_score(status, heartbeat_recency, CPU, memory, capacity) for production scheduling
 - ✅ **Task Queueing System** — Priority-based task queue (FIFO per priority), lifecycle management (Queued→Running→Completed)
-- ✅ **Worker Pool Orchestration** — Multi-node load balancing, automatic task assignment respecting dynamic capacity, completion tracking
+- ✅ **Worker Pool Orchestration** — Multi-factor load balancing, intelligent task assignment via scoring, completion tracking
 - ✅ **Result Aggregation** — Distributed result collection and combination from multiple workers
-- ✅ **25 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, resource-aware scheduling, heartbeat monitoring
+- ✅ **Heartbeat Monitoring** — Worker health validation with timeout-based pruning of dead nodes
+- ✅ **30 Comprehensive Tests** — Multi-worker scenarios, priority ordering, dynamic capacity, scoring, resource-aware scheduling, heartbeat monitoring
 
 **TIER 8: ML Integration ✅ COMPLETE (538 lines, 23 tests):**
 - ✅ **Pattern Learning** — VulnerabilityPattern registration, k-means clustering, signature-based grouping
@@ -340,7 +342,101 @@ if let Some(worker) = pool.get_available_worker() {
 
 ---
 
-### 8. Runner Hardening (v0.9.0+)
+### 8. Production-Grade Worker Selection (P1 - Scoring)
+
+**Problem (NEW v0.9.0+)**
+- ⚠️ **OLD APPROACH:** Worker selection used `min_by_key(current_tasks)`
+  - Simple: just pick the least-loaded worker
+  - Ignores: status, heartbeat freshness, CPU/memory utilization
+  - Result: might assign to Busy/Degraded or stale workers
+
+**Solution: Multi-Factor Scoring**
+- Each worker gets a score (0-100 points) based on:
+  1. **Status** (25 pts) — Healthy: 25, Busy: 15, Degraded: 5, Offline: -1000
+  2. **Heartbeat Recency** (20 pts) — Fresh (< 5s): 20 → Stale (> 30s): 0
+  3. **CPU Utilization** (15 pts) — 0% CPU: 15 → 100% CPU: 0
+  4. **Memory Utilization** (15 pts) — 0% mem: 15 → 100% mem: 0
+  5. **Available Capacity** (25 pts) — All slots free: 25 → No slots: 0
+
+**Scoring Example:**
+
+| Factor | Idle + Fresh | Busy + Stale |
+|--------|-------------|------------|
+| Status | 25 (Healthy) | 15 (Busy) |
+| Heartbeat | 20 (fresh) | 0 (stale) |
+| CPU | 13.5 (10%) | 2.25 (85%) |
+| Memory | 12.75 (15%) | 3.0 (80%) |
+| Capacity | 12.5 (5/10 free) | 2.5 (1/10 free) |
+| **TOTAL** | **83.75** | **22.75** |
+
+**Implementation:**
+
+```rust
+pub fn compute_score(&self, now_secs: u64) -> f32 {
+    let mut score = 0.0;
+    
+    // Status (critical filter)
+    score += match self.status {
+        Healthy => 25.0,
+        Busy => 15.0,
+        Degraded => 5.0,
+        Offline => return -1000.0,  // Never select
+    };
+    
+    // Heartbeat: degradation over time (fresh to stale)
+    let age = now - self.last_heartbeat;
+    score += if age < 5 { 20.0 }
+             else if age < 30 { 20.0 * (1.0 - age/30.0 * 0.5) }
+             else { 0.0 };
+    
+    // CPU & Memory (lower is better)
+    score += (100.0 - cpu) / 100.0 * 15.0;
+    score += (100.0 - memory) / 100.0 * 15.0;
+    
+    // Capacity (more slots is better)
+    score += (available_slots / capacity) * 25.0;
+    
+    score
+}
+```
+
+**Scheduler Update:**
+```rust
+// Old: filter(Healthy).min_by_key(current_tasks)
+// New: filter(!Offline).max_by(score)
+
+pub fn get_available_worker(&self) -> Option<WorkerNode> {
+    let now = SystemTime::now().as_secs();
+    
+    self.workers
+        .iter()
+        .filter(|w| w.status != Offline && w.available_slots() > 0)
+        .max_by(|a, b| {
+            let a_score = a.compute_score(now);
+            let b_score = b.compute_score(now);
+            a_score.partial_cmp(&b_score).unwrap_or(Equal)
+        })
+        .map(|w| w.clone())
+}
+```
+
+**Test Coverage (5 tests):**
+- ✅ test_worker_score_healthy_fresh — Healthy + fresh → score > 90
+- ✅ test_worker_score_offline_always_lowest — Offline → -1000
+- ✅ test_worker_score_stale_heartbeat — Stale loses 20 pts vs fresh
+- ✅ test_worker_score_high_utilization — High CPU/mem reduces score
+- ✅ test_worker_score_compare_selection — Idle selected over Busy
+
+**Impact:**
+- ✅ Production-ready scheduling (considers multiple factors)
+- ✅ Avoids overloading busy workers even if least loaded
+- ✅ Prefers workers with fresh heartbeats
+- ✅ Intelligent fallback (Busy selected only if no Healthy available)
+- ✅ Better load distribution across heterogeneous workers
+
+---
+
+### 9. Runner Hardening (v0.9.0+)
 
 **Timeout Enforcement (P0 Fix)**
 - Phase hangs → 5-min timeout enforced
@@ -383,7 +479,7 @@ if let Some(worker) = pool.get_available_worker() {
 - Independent phases (Banner/Port/DNS) run concurrently
 - 30-50% speedup for typical scans
 
-### 9. Module Sizing Policy
+### 10. Module Sizing Policy
 **Split Files at 300-400 Lines:**
 - ✅ Done: adaptive.rs (341 lines) → 4 modules
 - 🟡 Watch: anomaly.rs (400+ lines) → needs split
@@ -392,7 +488,7 @@ if let Some(worker) = pool.get_available_worker() {
 
 **Cost:** Split at 300 lines = 1 hour. Split at 1000 lines = 2-3 days + risk.
 
-### 10. Config Validation (Enforce at Construction)
+### 11. Config Validation (Enforce at Construction)
 **Pattern: TryFrom with Serde**
 ```rust
 #[serde(try_from = "RawConfig")]
@@ -409,7 +505,7 @@ impl TryFrom<RawConfig> for Config {
 
 **Prevents:** Invalid configs (timeout_secs=0, num_threads=0) silently shipping to production.
 
-### 11. Event Envelope Pattern (Future Dashboard)
+### 12. Event Envelope Pattern (Future Dashboard)
 **Separate Routing from Content:**
 ```rust
 pub struct EventEnvelope {
