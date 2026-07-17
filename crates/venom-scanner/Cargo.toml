@@ -20,6 +20,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 memmap2 = { workspace = true }
 nom = { workspace = true }
+mlua = { version = "0.9", features = ["lua54", "serialize", "vendored"] }
 
 [features]
 # Default features: core scanner with detection capabilities
