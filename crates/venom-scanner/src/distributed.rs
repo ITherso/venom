@@ -4,7 +4,7 @@
 //! for horizontal scaling across multiple nodes.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use dashmap::DashMap;
 
@@ -101,10 +101,10 @@ pub enum TaskPriority {
     Critical = 4,
 }
 
-/// Task queue for managing distributed work
+/// Task queue for managing distributed work (FIFO per priority)
 pub struct TaskQueue {
     tasks: Arc<DashMap<String, ScanTask>>,
-    queue: Arc<DashMap<u8, Vec<String>>>, // priority -> task_ids
+    queue: Arc<DashMap<u8, VecDeque<String>>>, // priority -> FIFO task_ids (NOT LIFO!)
 }
 
 impl TaskQueue {
@@ -122,15 +122,15 @@ impl TaskQueue {
         self.tasks.insert(task_id.clone(), task);
         self.queue
             .entry(priority)
-            .or_insert_with(Vec::new)
-            .push(task_id);
+            .or_insert_with(VecDeque::new)
+            .push_back(task_id);  // FIFO: push to back
     }
 
     pub fn dequeue(&self) -> Option<ScanTask> {
-        // Get highest priority task
+        // Get highest priority task (CRITICAL FIX: FIFO order, not LIFO!)
         for priority in (1..=4).rev() {
             if let Some(mut queue) = self.queue.get_mut(&priority) {
-                if let Some(task_id) = queue.pop() {
+                if let Some(task_id) = queue.pop_front() {  // FIFO: pop from front
                     if let Some((_, task)) = self.tasks.remove(&task_id) {
                         return Some(task);
                     }
