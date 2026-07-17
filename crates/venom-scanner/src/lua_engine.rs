@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -16,16 +16,63 @@ pub struct LuaScript {
     pub version: String,
     pub description: String,
     pub author: String,
-    pub script_path: String,
+    pub script_path: PathBuf,  // Canonicalized, safe path (prevents ../../../../etc/passwd)
     pub categories: Vec<String>,
     pub enabled: bool,
     pub timeout_ms: u64,
 }
 
 impl LuaScript {
-    pub fn new(name: impl Into<String>, script_path: impl Into<String>) -> Self {
+    /// Create new Lua script with path validation
+    ///
+    /// # Arguments
+    /// * `name` - Script name
+    /// * `script_path` - Path to script (must be within scripts/ root)
+    /// * `script_root` - Root directory for scripts (e.g., "./scripts/")
+    ///
+    /// # Returns
+    /// * `Ok(LuaScript)` if path is valid and within root
+    /// * `Err(String)` if path traversal or invalid
+    pub fn new_safe(
+        name: impl Into<String>,
+        script_path: impl AsRef<Path>,
+        script_root: &Path,
+    ) -> Result<Self, String> {
+        let path_buf = PathBuf::from(script_path.as_ref());
+
+        // Canonicalize both paths to resolve ../../ and symlinks
+        let canonical_script = path_buf.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize script path: {}", e))?;
+        let canonical_root = script_root.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize root path: {}", e))?;
+
+        // SECURITY: Ensure script is within root directory
+        if !canonical_script.starts_with(&canonical_root) {
+            return Err(format!(
+                "Path traversal detected: {} is outside root {}",
+                canonical_script.display(),
+                canonical_root.display()
+            ));
+        }
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            author: "Unknown".to_string(),
+            script_path: canonical_script,
+            categories: vec![],
+            enabled: true,
+            timeout_ms: 5000,
+        })
+    }
+
+    /// Create new script without validation (for testing only)
+    #[cfg(test)]
+    pub fn new_unsafe(name: impl Into<String>, script_path: impl Into<PathBuf>) -> Self {
         Self {
-            id: Uuid::new_v4(),  // Auto-generate unique ID
+            id: Uuid::new_v4(),
             name: name.into(),
             version: "1.0.0".to_string(),
             description: String::new(),
