@@ -7,6 +7,65 @@ use std::collections::HashMap;
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use uuid::Uuid;
+use std::str::FromStr;
+
+/// Script categories (type-safe, no typos, autocomplete)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ScriptCategory {
+    #[serde(rename = "web")]
+    Web,
+    #[serde(rename = "dns")]
+    DNS,
+    #[serde(rename = "smb")]
+    SMB,
+    #[serde(rename = "ssh")]
+    SSH,
+    #[serde(rename = "database")]
+    Database,
+}
+
+impl ScriptCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScriptCategory::Web => "web",
+            ScriptCategory::DNS => "dns",
+            ScriptCategory::SMB => "smb",
+            ScriptCategory::SSH => "ssh",
+            ScriptCategory::Database => "database",
+        }
+    }
+
+    pub fn all() -> &'static [ScriptCategory] {
+        &[
+            ScriptCategory::Web,
+            ScriptCategory::DNS,
+            ScriptCategory::SMB,
+            ScriptCategory::SSH,
+            ScriptCategory::Database,
+        ]
+    }
+}
+
+impl FromStr for ScriptCategory {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "web" => Ok(ScriptCategory::Web),
+            "dns" => Ok(ScriptCategory::DNS),
+            "smb" => Ok(ScriptCategory::SMB),
+            "ssh" => Ok(ScriptCategory::SSH),
+            "database" => Ok(ScriptCategory::Database),
+            _ => Err(format!("Unknown category: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for ScriptCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// Lua script metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,7 +76,7 @@ pub struct LuaScript {
     pub description: String,
     pub author: String,
     pub script_path: PathBuf,  // Canonicalized, safe path (prevents ../../../../etc/passwd)
-    pub categories: Vec<String>,
+    pub categories: Vec<ScriptCategory>,  // Type-safe: Web, DNS, SMB, SSH, Database (no typos)
     pub enabled: bool,
     pub timeout_ms: u64,
 }
@@ -94,7 +153,7 @@ impl LuaScript {
         self
     }
 
-    pub fn with_categories(mut self, cats: Vec<String>) -> Self {
+    pub fn with_categories(mut self, cats: Vec<ScriptCategory>) -> Self {
         self.categories = cats;
         self
     }
