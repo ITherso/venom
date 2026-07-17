@@ -242,6 +242,48 @@ impl WorkerPool {
     pub fn get_workers(&self) -> Vec<WorkerNode> {
         self.workers.iter().map(|entry| entry.value().clone()).collect()
     }
+
+    /// Update worker heartbeat (called when worker sends ping)
+    pub fn update_heartbeat(&self, worker_id: &str) {
+        if let Some(mut worker) = self.workers.get_mut(worker_id) {
+            worker.last_heartbeat = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
+    }
+
+    /// CRITICAL: Prune dead workers (no heartbeat for timeout_secs)
+    /// Must be called periodically to mark offline workers and prevent task assignment to dead nodes
+    pub fn prune_dead_workers(&self, heartbeat_timeout_secs: u64) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut pruned = 0;
+
+        for mut entry in self.workers.iter_mut() {
+            let worker = entry.value_mut();
+            let elapsed = now.saturating_sub(worker.last_heartbeat);
+
+            if elapsed > heartbeat_timeout_secs && worker.status != WorkerStatus::Offline {
+                worker.status = WorkerStatus::Offline;
+                pruned += 1;
+            }
+        }
+
+        pruned
+    }
+
+    /// Get alive workers (Healthy status + recent heartbeat)
+    pub fn get_alive_workers(&self) -> Vec<WorkerNode> {
+        self.workers
+            .iter()
+            .filter(|entry| entry.value().status == WorkerStatus::Healthy)
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
 }
 
 impl Default for WorkerPool {
