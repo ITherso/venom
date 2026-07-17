@@ -20,6 +20,13 @@ pub struct WorkerNode {
     pub current_tasks: u32,
     pub completed_tasks: u64,
     pub last_heartbeat: u64,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+    // Dynamic resource metrics
+    pub cpu_utilization: f32,      // 0.0-100.0 percent
+    pub memory_utilization: f32,   // 0.0-100.0 percent
+    pub network_utilization: f32,  // 0.0-100.0 percent
 }
 
 /// Worker status
@@ -42,6 +49,54 @@ impl WorkerStatus {
             WorkerStatus::Busy => "busy",
             WorkerStatus::Degraded => "degraded",
             WorkerStatus::Offline => "offline",
+        }
+    }
+}
+
+impl WorkerNode {
+    /// Dynamic capacity based on current resource utilization
+    /// Formula: base_capacity * (1 - max(cpu, memory, network) / 100)
+    /// Example: capacity=10, cpu=50%, ram=20%, net=30%
+    ///   effective = 10 * (1 - 50/100) = 5 tasks max
+    pub fn effective_capacity(&self) -> u32 {
+        if self.status != WorkerStatus::Healthy {
+            return 0;  // Offline/Degraded workers can't take tasks
+        }
+
+        let max_utilization = self.cpu_utilization
+            .max(self.memory_utilization)
+            .max(self.network_utilization)
+            .min(100.0)  // Cap at 100%
+            .max(0.0);   // Floor at 0%
+
+        let availability_factor = (100.0 - max_utilization) / 100.0;
+        ((self.capacity as f32) * availability_factor).ceil() as u32
+    }
+
+    /// Available slots for new tasks
+    pub fn available_slots(&self) -> u32 {
+        self.effective_capacity().saturating_sub(self.current_tasks)
+    }
+
+    /// Update resource metrics (called by heartbeat ping)
+    pub fn update_metrics(&mut self, cpu: f32, memory: f32, network: f32) {
+        self.cpu_utilization = cpu.clamp(0.0, 100.0);
+        self.memory_utilization = memory.clamp(0.0, 100.0);
+        self.network_utilization = network.clamp(0.0, 100.0);
+    }
+
+    /// Determine health status based on resource utilization
+    pub fn compute_status(&mut self) {
+        let max_util = self.cpu_utilization
+            .max(self.memory_utilization)
+            .max(self.network_utilization);
+
+        if max_util > 90.0 {
+            self.status = WorkerStatus::Degraded;
+        } else if max_util > 80.0 || self.current_tasks >= self.capacity {
+            self.status = WorkerStatus::Busy;
+        } else if self.status != WorkerStatus::Offline {
+            self.status = WorkerStatus::Healthy;
         }
     }
 }
@@ -187,7 +242,7 @@ impl WorkerPool {
             .filter(|entry| {
                 let worker = entry.value();
                 worker.status == WorkerStatus::Healthy
-                    && worker.current_tasks < worker.capacity
+                    && worker.available_slots() > 0
             })
             .min_by_key(|entry| entry.value().current_tasks)
             .map(|entry| entry.value().clone())
@@ -342,6 +397,12 @@ mod tests {
             current_tasks: 0,
             completed_tasks: 0,
             last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
         };
 
         assert_eq!(worker.worker_id, "w1");
@@ -406,6 +467,12 @@ mod tests {
             current_tasks: 0,
             completed_tasks: 0,
             last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+            cpu_utilization: 20.0,
+            memory_utilization: 30.0,
+            network_utilization: 10.0,
         };
 
         pool.register_worker(worker);
@@ -425,6 +492,12 @@ mod tests {
             current_tasks: 0,
             completed_tasks: 0,
             last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+            cpu_utilization: 25.0,
+            memory_utilization: 35.0,
+            network_utilization: 15.0,
         };
 
         pool.register_worker(worker);
@@ -575,6 +648,9 @@ mod tests {
             current_tasks: 0,
             completed_tasks: 0,
             last_heartbeat: 9999,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
         };
 
         let offline_worker = WorkerNode {
@@ -587,6 +663,9 @@ mod tests {
             current_tasks: 0,
             completed_tasks: 0,
             last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
         };
 
         pool.register_worker(healthy_worker);
@@ -596,5 +675,127 @@ mod tests {
         assert_eq!(alive.len(), 1);
         assert_eq!(alive[0].worker_id, "w1");
         assert_eq!(alive[0].status, WorkerStatus::Healthy);
+    }
+
+    #[test]
+    fn test_effective_capacity_healthy() {
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 30.0,  // Max 30%, so 70% available
+            memory_utilization: 20.0,
+            network_utilization: 10.0,
+        };
+
+        // capacity * (1 - max_util / 100) = 10 * (1 - 30/100) = 10 * 0.7 = 7
+        assert_eq!(worker.effective_capacity(), 7);
+    }
+
+    #[test]
+    fn test_effective_capacity_high_utilization() {
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 85.0,  // Max 85%, so 15% available
+            memory_utilization: 75.0,
+            network_utilization: 80.0,
+        };
+
+        // capacity * (1 - max_util / 100) = 10 * (1 - 85/100) = 10 * 0.15 = 1.5 → ceil = 2
+        assert_eq!(worker.effective_capacity(), 2);
+    }
+
+    #[test]
+    fn test_effective_capacity_offline_worker() {
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Offline,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 10.0,
+            memory_utilization: 10.0,
+            network_utilization: 10.0,
+        };
+
+        // Offline worker has 0 effective capacity regardless of metrics
+        assert_eq!(worker.effective_capacity(), 0);
+    }
+
+    #[test]
+    fn test_available_slots() {
+        let mut worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 2,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 30.0,  // Effective capacity = 7
+            memory_utilization: 20.0,
+            network_utilization: 10.0,
+        };
+
+        // effective_capacity (7) - current_tasks (2) = 5 available slots
+        assert_eq!(worker.available_slots(), 5);
+
+        // Assign more tasks
+        worker.current_tasks = 7;
+        assert_eq!(worker.available_slots(), 0);
+    }
+
+    #[test]
+    fn test_update_and_compute_metrics() {
+        let mut worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 0,
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 20.0,
+            memory_utilization: 20.0,
+            network_utilization: 20.0,
+        };
+
+        // Update metrics to low utilization
+        worker.update_metrics(30.0, 25.0, 20.0);
+        worker.compute_status();
+        assert_eq!(worker.status, WorkerStatus::Healthy);
+
+        // Update metrics to high utilization
+        worker.update_metrics(92.0, 88.0, 85.0);
+        worker.compute_status();
+        assert_eq!(worker.status, WorkerStatus::Degraded);
+
+        // Update metrics to moderate (but tasks at capacity)
+        worker.current_tasks = 10;
+        worker.update_metrics(75.0, 70.0, 65.0);
+        worker.compute_status();
+        assert_eq!(worker.status, WorkerStatus::Busy);
     }
 }
