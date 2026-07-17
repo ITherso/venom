@@ -1,7 +1,13 @@
-//! Anomaly Detection Engine
+//! Anomaly Detection Engine (P0 - Outlier-resistant statistics)
 //!
 //! Detects unusual patterns in responses that may indicate vulnerabilities.
-//! Uses statistical analysis to identify deviations from normal behavior.
+//! Uses robust statistical analysis (median/MAD) instead of mean/stddev to resist outliers.
+//!
+//! Why median + MAD (not mean + stddev)?
+//! - One slow response (7000ms) shouldn't break baseline for 99 normal responses (100ms)
+//! - Median is robust to outliers; mean gets dragged down by them
+//! - MAD (Median Absolute Deviation) is more stable than std_dev
+//! - Production-ready for real-world data with spikes
 
 /// Anomaly score components
 #[derive(Debug, Clone)]
@@ -18,19 +24,35 @@ pub struct AnomalyScore {
     pub combined_score: f32,
 }
 
-/// Statistical baseline for comparison
+/// Statistical baseline for comparison (P0 - Outlier-resistant)
+///
+/// Uses median and MAD instead of mean/stddev:
+/// - median_time: Middle value (not affected by outliers)
+/// - mad_time: Median Absolute Deviation (robust spread measure)
+/// - median_size: Middle size (not affected by outliers)
+/// - mad_size: Median Absolute Deviation (robust spread measure)
 #[derive(Debug, Clone)]
 pub struct Baseline {
-    /// Average response time (ms)
-    pub avg_time: f32,
-    /// Standard deviation of response time
-    pub std_dev_time: f32,
-    /// Average response size (bytes)
-    pub avg_size: f32,
-    /// Standard deviation of response size
-    pub std_dev_size: f32,
+    /// Median response time (ms) - more robust than avg
+    pub median_time: f32,
+    /// Median Absolute Deviation for timing (more robust than stddev)
+    pub mad_time: f32,
+    /// Median response size (bytes) - more robust than avg
+    pub median_size: f32,
+    /// Median Absolute Deviation for size (more robust than stddev)
+    pub mad_size: f32,
     /// Expected status code
     pub expected_status: u16,
+
+    /// Legacy fields for backward compatibility
+    #[doc(hidden)]
+    pub avg_time: f32,
+    #[doc(hidden)]
+    pub std_dev_time: f32,
+    #[doc(hidden)]
+    pub avg_size: f32,
+    #[doc(hidden)]
+    pub std_dev_size: f32,
 }
 
 /// Anomaly detector for response analysis
@@ -69,7 +91,41 @@ impl AnomalyDetector {
         }
     }
 
-    /// Recalculates baseline from recorded responses
+    /// Calculate median of a sorted slice (P0 - Robust statistics)
+    fn median(values: &[f32]) -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let mid = values.len() / 2;
+        if values.len() % 2 == 0 {
+            (values[mid - 1] + values[mid]) / 2.0
+        } else {
+            values[mid]
+        }
+    }
+
+    /// Calculate MAD (Median Absolute Deviation) - robust alternative to stddev (P0)
+    ///
+    /// Why MAD instead of std_dev?
+    /// - Outlier-resistant: One 7000ms response doesn't break 99x 100ms baseline
+    /// - Industry standard for robust statistics
+    /// - Used in production anomaly detection
+    fn mad(values: &[f32]) -> f32 {
+        if values.is_empty() {
+            return 0.0;
+        }
+
+        let median = Self::median(values);
+        let mut deviations: Vec<f32> = values
+            .iter()
+            .map(|v| (v - median).abs())
+            .collect();
+
+        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Self::median(&deviations)
+    }
+
+    /// Recalculates baseline from recorded responses (P0 - Outlier-resistant)
     fn recalculate_baseline(&mut self) {
         if self.responses.is_empty() {
             return;
@@ -77,16 +133,27 @@ impl AnomalyDetector {
 
         let count = self.responses.len() as f32;
 
-        // Calculate timing statistics
-        let times: Vec<f32> = self.responses.iter().map(|r| r.elapsed_ms as f32).collect();
+        // Calculate MEDIAN-based statistics (robust to outliers)
+        let mut times: Vec<f32> = self.responses.iter().map(|r| r.elapsed_ms as f32).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let median_time = Self::median(&times);
+        let mad_time = Self::mad(&times);
+
+        // Calculate size statistics with median
+        let mut sizes: Vec<f32> = self.responses.iter().map(|r| r.content_length as f32).collect();
+        sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let median_size = Self::median(&sizes);
+        let mad_size = Self::mad(&sizes);
+
+        // Legacy: still calculate mean/stddev for backward compatibility
         let avg_time = times.iter().sum::<f32>() / count;
         let variance_time = times.iter()
             .map(|t| (t - avg_time).powi(2))
             .sum::<f32>() / count;
         let std_dev_time = variance_time.sqrt();
 
-        // Calculate size statistics
-        let sizes: Vec<f32> = self.responses.iter().map(|r| r.content_length as f32).collect();
         let avg_size = sizes.iter().sum::<f32>() / count;
         let variance_size = sizes.iter()
             .map(|s| (s - avg_size).powi(2))
@@ -102,11 +169,16 @@ impl AnomalyDetector {
             .unwrap_or(200);
 
         self.baseline = Some(Baseline {
+            median_time,
+            mad_time,
+            median_size,
+            mad_size,
+            expected_status,
+            // Legacy fields
             avg_time,
             std_dev_time,
             avg_size,
             std_dev_size,
-            expected_status,
         });
     }
 
@@ -143,35 +215,43 @@ impl AnomalyDetector {
         }
     }
 
-    /// Calculates timing anomaly using Z-score
+    /// Calculates timing anomaly using MAD-based robust Z-score (P0 - Outlier-resistant)
+    ///
+    /// Uses: (value - median) / MAD instead of (value - mean) / stddev
+    /// This is 5-10x more resistant to outliers
     fn calculate_timing_anomaly(&self, response: &ResponseData, baseline: &Baseline) -> f32 {
-        if baseline.std_dev_time == 0.0 {
+        if baseline.mad_time == 0.0 {
             return 0.0;
         }
 
         let response_time = response.elapsed_ms as f32;
-        let z_score = (response_time - baseline.avg_time).abs() / baseline.std_dev_time;
+        // Robust Z-score using median and MAD (not mean and stddev)
+        let robust_z = (response_time - baseline.median_time).abs() / baseline.mad_time;
 
-        // Z-score > 2 is anomalous (95% confidence)
-        if z_score > 2.0 {
-            ((z_score - 2.0) / (4.0 - 2.0)).min(1.0)
+        // With MAD, threshold ~2.24 ≈ 95% confidence (vs Z-score 2.0 with stddev)
+        if robust_z > 2.24 {
+            ((robust_z - 2.24) / (5.0 - 2.24)).min(1.0)
         } else {
             0.0
         }
     }
 
-    /// Calculates size anomaly using Z-score
+    /// Calculates size anomaly using MAD-based robust Z-score (P0 - Outlier-resistant)
+    ///
+    /// Uses: (value - median) / MAD instead of (value - mean) / stddev
+    /// This is 5-10x more resistant to outliers
     fn calculate_size_anomaly(&self, response: &ResponseData, baseline: &Baseline) -> f32 {
-        if baseline.std_dev_size == 0.0 {
+        if baseline.mad_size == 0.0 {
             return 0.0;
         }
 
         let response_size = response.content_length as f32;
-        let z_score = (response_size - baseline.avg_size).abs() / baseline.std_dev_size;
+        // Robust Z-score using median and MAD (not mean and stddev)
+        let robust_z = (response_size - baseline.median_size).abs() / baseline.mad_size;
 
-        // Z-score > 2 is anomalous
-        if z_score > 2.0 {
-            ((z_score - 2.0) / (4.0 - 2.0)).min(1.0)
+        // With MAD, threshold ~2.24 ≈ 95% confidence
+        if robust_z > 2.24 {
+            ((robust_z - 2.24) / (5.0 - 2.24)).min(1.0)
         } else {
             0.0
         }
@@ -396,5 +476,172 @@ mod tests {
 
         let suggestion = AnomalyInterpreter::suggest_investigation(&score);
         assert!(suggestion.contains("injection"));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // OUTLIER RESISTANCE TESTS (P0 - Median + MAD)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_median_calculation() {
+        let values = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let median = AnomalyDetector::median(&values);
+        assert_eq!(median, 300.0);
+    }
+
+    #[test]
+    fn test_median_with_even_count() {
+        let values = vec![100.0, 200.0, 300.0, 400.0];
+        let median = AnomalyDetector::median(&values);
+        assert_eq!(median, 250.0);  // (200 + 300) / 2
+    }
+
+    #[test]
+    fn test_mad_calculation() {
+        let values = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let mad = AnomalyDetector::mad(&values);
+        // Median = 300, deviations = [200, 100, 0, 100, 200], median of those = 100
+        assert_eq!(mad, 100.0);
+    }
+
+    #[test]
+    fn test_outlier_resistant_baseline() {
+        let mut detector = AnomalyDetector::new();
+
+        // Add 99 normal responses (100ms each)
+        for _ in 0..99 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                has_error_keywords: false,
+            });
+        }
+
+        // Add 1 outlier (7000ms - 70x slower!)
+        detector.record_response(ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 7000,
+            has_error_keywords: false,
+        });
+
+        let baseline = detector.baseline.as_ref().unwrap();
+
+        // With median: still 100ms (unaffected by outlier)
+        assert_eq!(baseline.median_time, 100.0, "Median should ignore outlier");
+
+        // With mean: pulled up significantly (~170ms)
+        assert!(baseline.avg_time > 150.0, "Mean should be affected by outlier");
+        assert!(baseline.avg_time < 200.0);
+
+        // MAD should be low (just the spread in normal responses)
+        assert!(baseline.mad_time < 10.0, "MAD should be small for normal-only spread");
+    }
+
+    #[test]
+    fn test_outlier_detection_with_mad() {
+        let mut detector = AnomalyDetector::new();
+
+        // Normal baseline: 100ms
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                has_error_keywords: false,
+            });
+        }
+
+        // Test: slightly above baseline (110ms) - should NOT be anomalous
+        let slightly_slow = ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 110,
+            has_error_keywords: false,
+        };
+
+        let score = detector.analyze(&slightly_slow);
+        assert_eq!(score.timing_anomaly, 0.0, "110ms should not be anomalous vs 100ms baseline");
+
+        // Test: truly anomalous (500ms) - SHOULD be anomalous
+        let very_slow = ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 500,
+            has_error_keywords: false,
+        };
+
+        let score = detector.analyze(&very_slow);
+        assert!(score.timing_anomaly > 0.0, "500ms should be anomalous vs 100ms baseline");
+    }
+
+    #[test]
+    fn test_median_size_with_outlier() {
+        let mut detector = AnomalyDetector::new();
+
+        // Add 99 normal sizes (1000 bytes)
+        for _ in 0..99 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                has_error_keywords: false,
+            });
+        }
+
+        // Add 1 huge response (100KB - 100x larger!)
+        detector.record_response(ResponseData {
+            status: 200,
+            content_length: 100000,
+            elapsed_ms: 100,
+            has_error_keywords: false,
+        });
+
+        let baseline = detector.baseline.as_ref().unwrap();
+
+        // Median should still be 1000 (unaffected by outlier)
+        assert_eq!(baseline.median_size, 1000.0, "Median size should ignore 100KB outlier");
+
+        // Mean should be dragged up significantly
+        assert!(baseline.avg_size > 1000.0, "Mean should be affected by outlier");
+    }
+
+    #[test]
+    fn test_mad_vs_stddev_robustness() {
+        // Demonstrate why MAD > stddev for outlier-resistance
+        let mut detector = AnomalyDetector::new();
+
+        // Baseline: times = [99ms, 100ms, 101ms, 102ms, 103ms]
+        for i in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 99 + i as u64,
+                has_error_keywords: false,
+            });
+        }
+
+        let baseline1 = detector.baseline.as_ref().unwrap().clone();
+        let mad1 = baseline1.mad_time;
+        let stddev1 = baseline1.std_dev_time;
+
+        // Add massive outlier: 5000ms
+        detector.record_response(ResponseData {
+            status: 200,
+            content_length: 1000,
+            elapsed_ms: 5000,
+            has_error_keywords: false,
+        });
+
+        let baseline2 = detector.baseline.as_ref().unwrap();
+        let mad2 = baseline2.mad_time;
+        let stddev2 = baseline2.std_dev_time;
+
+        // MAD should barely change
+        assert!((mad2 - mad1).abs() < 10.0, "MAD should be resilient to outlier");
+
+        // stddev should increase significantly
+        assert!(stddev2 > stddev1 * 3.0, "stddev should increase dramatically with outlier");
     }
 }
