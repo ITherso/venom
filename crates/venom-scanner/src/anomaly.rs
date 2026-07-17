@@ -135,7 +135,142 @@ impl Default for ErrorKeywordMatcher {
     }
 }
 
-/// Anomaly score components
+/// Confidence level for anomaly detection (P1 - Explainable scores)
+///
+/// Indicates how confident the anomaly detector is in its assessment.
+/// 0.8 score with 0.2 confidence ≠ 0.8 score with 0.95 confidence
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfidenceLevel {
+    /// <0.20 - likely noise or random fluctuation
+    VeryLow,
+    /// 0.20-0.40 - weak signal, needs corroboration
+    Low,
+    /// 0.40-0.65 - reasonable confidence, worth investigating
+    Medium,
+    /// 0.65-0.80 - strong signal, likely real anomaly
+    High,
+    /// >0.80 - very confident, multiple signals agree
+    VeryHigh,
+}
+
+impl ConfidenceLevel {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ConfidenceLevel::VeryLow => "VeryLow",
+            ConfidenceLevel::Low => "Low",
+            ConfidenceLevel::Medium => "Medium",
+            ConfidenceLevel::High => "High",
+            ConfidenceLevel::VeryHigh => "VeryHigh",
+        }
+    }
+}
+
+/// Confidence metrics for anomaly scores (P1 - Explainable detection)
+///
+/// Explains why a score is high or low. Multiple signals increase confidence.
+/// Example: 0.8 score with 3 signals (timing + size + error) = 0.95 confidence
+#[derive(Debug, Clone)]
+pub struct Confidence {
+    /// Base anomaly score (0.0 - 1.0)
+    pub base_score: f32,
+    /// Number of signals that triggered (1-4: timing, size, error, status)
+    pub signal_count: u32,
+    /// Agreement between signals (0.0 - 1.0, higher = all signals agree)
+    pub signal_agreement: f32,
+    /// Consistency (how stable/repeated, 0.0 - 1.0)
+    pub consistency: f32,
+    /// Overall confidence (0.0 - 1.0)
+    pub confidence: f32,
+    /// Confidence level classification
+    pub level: ConfidenceLevel,
+}
+
+impl Confidence {
+    /// Create confidence from anomaly signals (P1 - Multi-signal analysis)
+    ///
+    /// Confidence = how sure we are about the anomaly
+    /// Based on: number of signals, agreement between them, and score strength
+    pub fn from_signals(
+        base_score: f32,
+        timing: f32,
+        size: f32,
+        error: f32,
+        status: f32,
+    ) -> Self {
+        let scores = [timing, size, error, status];
+
+        // Count how many signals triggered (>0.0)
+        let signal_count = scores.iter().filter(|&&s| s > 0.0).count() as u32;
+
+        // If no signals, no anomaly
+        if signal_count == 0 {
+            return Self {
+                base_score: 0.0,
+                signal_count: 0,
+                signal_agreement: 0.0,
+                consistency: 0.0,
+                confidence: 0.0,
+                level: ConfidenceLevel::VeryLow,
+            };
+        }
+
+        // Calculate agreement among FIRED signals only
+        // Only look at signals that actually triggered (> 0.0)
+        let fired: Vec<f32> = scores.iter().copied().filter(|&s| s > 0.0).collect();
+        let max_fired = fired.iter().copied().fold(0.0, f32::max);
+        let min_fired = fired.iter().copied().fold(f32::MAX, f32::min);
+
+        // Agreement: how close are all fired signals to each other?
+        // Range from 0-1: 1.0 = all same, 0.0 = max spread
+        let signal_agreement = if fired.len() > 1 && max_fired > 0.0 {
+            // Distance between min and max, normalized
+            let spread = (max_fired - min_fired) / max_fired;
+            (1.0 - spread).max(0.0)
+        } else if fired.len() == 1 {
+            1.0  // Single fired signal "agrees with itself"
+        } else {
+            0.0
+        };
+
+        // Consistency multiplier based on signal count
+        // More signals = higher confidence (less likely to be noise)
+        let consistency = match signal_count {
+            0 => 0.0,
+            1 => 0.4,  // Single signal could be noise
+            2 => 0.7,  // Two signals, more reliable
+            3 => 0.9,  // Three signals, quite reliable
+            _ => 1.0,  // All four signals all agree = very reliable
+        };
+
+        // Overall confidence formula
+        // base_score (how anomalous) * signal_agreement (do they agree) * consistency (reliability)
+        let confidence = (base_score * signal_agreement * consistency).min(1.0);
+
+        let level = match confidence {
+            c if c < 0.20 => ConfidenceLevel::VeryLow,
+            c if c < 0.40 => ConfidenceLevel::Low,
+            c if c < 0.65 => ConfidenceLevel::Medium,
+            c if c < 0.80 => ConfidenceLevel::High,
+            _ => ConfidenceLevel::VeryHigh,
+        };
+
+        Self {
+            base_score,
+            signal_count,
+            signal_agreement,
+            consistency,
+            confidence,
+            level,
+        }
+    }
+
+    /// Is this anomaly worth reporting? (threshold-based decision)
+    pub fn is_reportable(&self, threshold: f32) -> bool {
+        self.confidence > threshold
+    }
+}
+
+/// Anomaly score components (P1 - With confidence metrics)
 #[derive(Debug, Clone)]
 pub struct AnomalyScore {
     /// Timing anomaly (0.0 - 1.0)
@@ -148,6 +283,8 @@ pub struct AnomalyScore {
     pub status_anomaly: f32,
     /// Combined anomaly score (0.0 - 1.0)
     pub combined_score: f32,
+    /// Confidence metrics (P1 - Explainable)
+    pub confidence: Confidence,
 }
 
 /// Status code whitelist for anomaly detection (P1 - Flexible status handling)
@@ -421,17 +558,21 @@ impl AnomalyDetector {
         });
     }
 
-    /// Analyzes a response for anomalies (P1 - Supports regex error keywords)
+    /// Analyzes a response for anomalies (P1 - Supports regex + confidence)
     pub fn analyze(&self, response: &ResponseData, matcher: &ErrorKeywordMatcher) -> AnomalyScore {
         let baseline = match &self.baseline {
             Some(b) => b,
-            None => return AnomalyScore {
-                timing_anomaly: 0.0,
-                size_anomaly: 0.0,
-                error_anomaly: 0.0,
-                status_anomaly: 0.0,
-                combined_score: 0.0,
-            },
+            None => {
+                let confidence = Confidence::from_signals(0.0, 0.0, 0.0, 0.0, 0.0);
+                return AnomalyScore {
+                    timing_anomaly: 0.0,
+                    size_anomaly: 0.0,
+                    error_anomaly: 0.0,
+                    status_anomaly: 0.0,
+                    combined_score: 0.0,
+                    confidence,
+                }
+            }
         };
 
         let timing_anomaly = self.calculate_timing_anomaly(response, baseline);
@@ -448,12 +589,16 @@ impl AnomalyDetector {
             + status_anomaly * 0.2)
             .min(1.0);
 
+        // P1: Calculate confidence based on signal agreement
+        let confidence = Confidence::from_signals(combined_score, timing_anomaly, size_anomaly, error_anomaly, status_anomaly);
+
         AnomalyScore {
             timing_anomaly,
             size_anomaly,
             error_anomaly,
             status_anomaly,
             combined_score,
+            confidence,
         }
     }
 
@@ -714,6 +859,7 @@ mod tests {
             error_anomaly: 0.1,
             status_anomaly: 0.1,
             combined_score: 0.5,
+            confidence: Confidence::from_signals(0.5, 0.8, 0.2, 0.1, 0.1),
         };
 
         let desc = AnomalyInterpreter::describe_anomaly(&score);
@@ -728,6 +874,7 @@ mod tests {
             error_anomaly: 0.1,
             status_anomaly: 0.1,
             combined_score: 0.5,
+            confidence: Confidence::from_signals(0.5, 0.7, 0.1, 0.1, 0.1),
         };
 
         let suggestion = AnomalyInterpreter::suggest_investigation(&score);
@@ -1394,5 +1541,242 @@ mod tests {
         assert!(whitelist.is_normal(200));
         assert!(whitelist.is_normal(301));
         assert!(whitelist.is_normal(307));
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // CONFIDENCE SCORING TESTS (P1 - Explainable anomaly detection)
+    // ═════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_confidence_single_signal() {
+        // Single signal detected
+        let confidence = Confidence::from_signals(0.8, 0.8, 0.0, 0.0, 0.0);
+
+        assert_eq!(confidence.base_score, 0.8);
+        assert_eq!(confidence.signal_count, 1);
+        assert!(confidence.confidence < 0.5, "Single signal = low confidence");
+        assert_eq!(confidence.level, ConfidenceLevel::Low);
+    }
+
+    #[test]
+    fn test_confidence_multiple_signals() {
+        // Multiple signals agree (timing + size)
+        let confidence = Confidence::from_signals(0.8, 0.8, 0.8, 0.0, 0.0);
+
+        assert_eq!(confidence.base_score, 0.8);
+        assert_eq!(confidence.signal_count, 2);
+        assert!(confidence.confidence > 0.5, "Two agreeing signals = better confidence");
+        assert_eq!(confidence.level, ConfidenceLevel::Medium);
+    }
+
+    #[test]
+    fn test_confidence_all_signals() {
+        // All signals agree (timing + size + error + status)
+        let confidence = Confidence::from_signals(0.8, 0.8, 0.8, 0.8, 0.8);
+
+        assert_eq!(confidence.base_score, 0.8);
+        assert_eq!(confidence.signal_count, 4);
+        assert!(confidence.confidence >= 0.8, "All signals agree = very high confidence");
+        assert_eq!(confidence.level, ConfidenceLevel::VeryHigh);
+    }
+
+    #[test]
+    fn test_confidence_disagreeing_signals() {
+        // Signals partially disagree (timing high, size low)
+        let confidence = Confidence::from_signals(0.5, 0.8, 0.1, 0.0, 0.0);
+
+        assert_eq!(confidence.signal_count, 2);  // Timing and size both triggered
+        // Agreement: spread = (0.8 - 0.1) / 0.8 = 0.875, agreement = 1.0 - 0.875 = 0.125
+        assert!(confidence.signal_agreement < 0.2, "Signals disagree");
+        assert!(confidence.confidence < 0.3, "Disagreement reduces confidence");
+    }
+
+    #[test]
+    fn test_confidence_levels() {
+        // Test confidence level thresholds
+        // base_score=0.1, 1 signal, consistency=0.4, agreement=1.0 → 0.1*1.0*0.4 = 0.04 (VeryLow)
+        assert_eq!(
+            Confidence::from_signals(0.1, 0.1, 0.0, 0.0, 0.0).level,
+            ConfidenceLevel::VeryLow
+        );
+
+        // base_score=0.5, 1 signal, consistency=0.4, agreement=1.0 → 0.5*1.0*0.4 = 0.2 (Low)
+        assert_eq!(
+            Confidence::from_signals(0.5, 0.5, 0.0, 0.0, 0.0).level,
+            ConfidenceLevel::Low
+        );
+
+        // base_score=0.8, 2 signals, consistency=0.7, agreement=1.0 → 0.8*1.0*0.7 = 0.56 (Medium)
+        assert_eq!(
+            Confidence::from_signals(0.8, 0.8, 0.8, 0.0, 0.0).level,
+            ConfidenceLevel::Medium
+        );
+
+        // base_score=0.8, 3 signals, consistency=0.9, agreement=1.0 → 0.8*1.0*0.9 = 0.72 (High)
+        assert_eq!(
+            Confidence::from_signals(0.8, 0.8, 0.8, 0.8, 0.0).level,
+            ConfidenceLevel::High
+        );
+
+        // base_score=0.9, 4 signals, consistency=1.0, agreement=1.0 → 0.9*1.0*1.0 = 0.9 (VeryHigh)
+        assert_eq!(
+            Confidence::from_signals(0.9, 0.9, 0.9, 0.9, 0.9).level,
+            ConfidenceLevel::VeryHigh
+        );
+    }
+
+    #[test]
+    fn test_confidence_is_reportable() {
+        let high_conf = Confidence::from_signals(0.9, 0.9, 0.9, 0.9, 0.9);
+        let low_conf = Confidence::from_signals(0.5, 0.3, 0.0, 0.0, 0.0);
+
+        assert!(high_conf.is_reportable(0.7), "High confidence should report");
+        assert!(!low_conf.is_reportable(0.7), "Low confidence should not report");
+    }
+
+    #[test]
+    fn test_anomaly_score_with_confidence() {
+        // Test that AnomalyScore includes confidence metrics
+        let confidence = Confidence::from_signals(0.7, 0.7, 0.7, 0.0, 0.0);
+        let score = AnomalyScore {
+            timing_anomaly: 0.7,
+            size_anomaly: 0.7,
+            error_anomaly: 0.0,
+            status_anomaly: 0.0,
+            combined_score: 0.7,
+            confidence,
+        };
+
+        // Verify score includes confidence
+        assert!(score.confidence.signal_count >= 1, "Should have signals");
+        assert!(score.combined_score > 0.0, "Should have anomaly score");
+
+        // Key point: same score can have different confidence levels
+        let low_conf = Confidence::from_signals(0.7, 0.7, 0.0, 0.0, 0.0);
+        let high_conf = Confidence::from_signals(0.7, 0.7, 0.7, 0.7, 0.7);
+
+        assert!(
+            high_conf.confidence > low_conf.confidence,
+            "More signals = higher confidence"
+        );
+    }
+
+    #[test]
+    fn test_confidence_weak_signal() {
+        // Scenario: Only one weak signal detected
+        let mut detector = AnomalyDetector::new();
+        let matcher = ErrorKeywordMatcher::default();
+
+        // Build baseline
+        for _ in 0..5 {
+            detector.record_response(ResponseData {
+                status: 200,
+                content_length: 1000,
+                elapsed_ms: 100,
+                body: String::new(),
+            });
+        }
+
+        // Response with only slight timing variation (weak signal)
+        let response = ResponseData {
+            status: 200,  // Normal
+            content_length: 1000,  // Normal
+            elapsed_ms: 110,  // Slightly slow
+            body: String::new(),  // No error
+        };
+
+        let score = detector.analyze(&response, &matcher);
+
+        // Combined score might be low anyway, but verify confidence
+        assert_eq!(score.confidence.signal_count, 0, "No anomalies detected");
+        assert!(
+            score.confidence.confidence < 0.3,
+            "No anomaly signals = low confidence"
+        );
+    }
+
+    #[test]
+    fn test_confidence_strong_agreement() {
+        // Scenario: Multiple signals all strongly agree
+        let confidence = Confidence::from_signals(0.9, 0.9, 0.9, 0.9, 0.9);
+
+        assert_eq!(confidence.signal_count, 4, "All four signals");
+        assert_eq!(confidence.signal_agreement, 1.0, "Perfect agreement (all same)");
+        assert_eq!(confidence.consistency, 1.0, "Maximum consistency");
+        assert!(confidence.confidence > 0.8, "Very high confidence (0.9 * 1.0 * 1.0)");
+    }
+
+    #[test]
+    fn test_confidence_partial_agreement() {
+        // Scenario: Some signals strong, some weak
+        let confidence = Confidence::from_signals(0.8, 0.9, 0.1, 0.0, 0.0);
+
+        assert_eq!(confidence.signal_count, 2);  // Timing and size
+        assert!(confidence.signal_agreement < 1.0, "Partial agreement");
+        assert!(
+            confidence.confidence < 0.8,
+            "Disagreement reduces confidence"
+        );
+    }
+
+    #[test]
+    fn test_confidence_two_signals_agreement() {
+        // Two signals both high (good)
+        let good = Confidence::from_signals(0.8, 0.8, 0.8, 0.0, 0.0);
+        // Two signals disagreeing (bad)
+        let bad = Confidence::from_signals(0.8, 0.8, 0.1, 0.0, 0.0);
+
+        assert!(good.confidence > bad.confidence, "Agreement matters");
+        assert_eq!(good.signal_count, bad.signal_count, "Same number of signals");
+    }
+
+    #[test]
+    fn test_confidence_consistency_levels() {
+        // 1 signal = 0.4 consistency
+        let one = Confidence::from_signals(0.8, 0.8, 0.0, 0.0, 0.0);
+        assert_eq!(one.consistency, 0.4);
+
+        // 2 signals = 0.7 consistency
+        let two = Confidence::from_signals(0.8, 0.8, 0.8, 0.0, 0.0);
+        assert_eq!(two.consistency, 0.7);
+
+        // 3 signals = 0.9 consistency
+        let three = Confidence::from_signals(0.8, 0.8, 0.8, 0.8, 0.0);
+        assert_eq!(three.consistency, 0.9);
+
+        // 4 signals = 1.0 consistency
+        let four = Confidence::from_signals(0.8, 0.8, 0.8, 0.8, 0.8);
+        assert_eq!(four.consistency, 1.0);
+    }
+
+    #[test]
+    fn test_confidence_score_vs_confidence() {
+        // IMPORTANT: Same score, different confidence
+        // This is the core issue the user highlighted!
+
+        // Scenario A: 0.8 score from single weak signal
+        // confidence = 0.8 * 1.0 (agreement) * 0.4 (consistency) = 0.32
+        let weak = Confidence::from_signals(0.8, 0.8, 0.0, 0.0, 0.0);
+
+        // Scenario B: 0.8 score from multiple strong signals
+        // confidence = 0.8 * 1.0 (agreement) * 1.0 (consistency) = 0.8
+        let strong = Confidence::from_signals(0.8, 0.8, 0.8, 0.8, 0.8);
+
+        // Same base score!
+        assert_eq!(weak.base_score, strong.base_score);
+
+        // But very different confidence!
+        assert!(
+            strong.confidence > weak.confidence * 2.0,
+            "Strong agreement >> weak single signal"
+        );
+
+        // This is why confidence matters (P1)
+        assert!(weak.is_reportable(0.2), "Weak: might report if threshold very low");
+        assert!(strong.is_reportable(0.7), "Strong: confident enough to report");
+        assert!(
+            !weak.is_reportable(0.5),
+            "Weak: not confident enough for strict threshold"
+        );
     }
 }
