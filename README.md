@@ -5,11 +5,41 @@
 [![Version 1.0.0](https://img.shields.io/badge/Version-1.0.0-brightgreen.svg)](https://github.com/ITherso/venom)
 [![GitHub](https://img.shields.io/badge/GitHub-ITherso%2Fvenom-blue.svg)](https://github.com/ITherso/venom)
 
-> **VENOM v1.0.0** — Complete enterprise-grade pentesting platform. MITM proxy + scanner + zero-day engine + post-exploitation + CLI + Web Dashboard + Performance Optimization + Security Hardening + Compliance & Reporting.
+> **VENOM v1.0.0** — Comprehensive pentesting framework with MITM proxy, multi-phase scanner, plugin system, Lua scripting, event bus, and compliance support.
 
-**Status:** v1.0.0 PRODUCTION | All Phases Complete | 19,100+ Lines Rust Scanner | 573+ Tests | 37 Modules | Enterprise-Ready
+**Status:** v1.0.0 ALPHA | Experimental | Not Production-Ready | 19,100+ Lines Rust | 573+ Tests | 37 Modules | Security/Performance Review Needed
 
-**TIER 1-17 ✅ COMPLETE** — NSE-Style Scriptable Pentesting Powerhouse
+**⚠️ STABILITY LEVELS:**
+- 🟢 **STABLE** — MITM Proxy, Core Phases (1-6), Plugin System, API Gateway
+- 🟡 **BETA** — Distributed Scaling, ML Integration, Advanced Detection, Threat Intelligence  
+- 🔴 **EXPERIMENTAL** — Lua Scripting, Event Bus, Post-Exploitation, Advanced Features
+
+**TIER 1-17 ✅ IMPLEMENTED** — Research-Grade Pentesting Framework
+
+---
+
+## ⚠️ Important: Current Limitations
+
+**This is research-grade software, NOT production-ready.**
+
+**Missing for Production:**
+- ❌ Performance benchmarks (throughput, latency, memory)
+- ❌ Security audit (3rd party review)
+- ❌ Fuzz testing & chaos testing
+- ❌ Load testing results
+- ❌ CVE disclosure policy
+- ❌ Security incident response plan
+- ❌ Kubernetes/Docker deployment guide
+- ❌ Monitoring integration (Prometheus)
+- ❌ Architecture documentation
+
+**See:** [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) for full checklist
+
+**Recommended For:**
+- ✅ Security research & education
+- ✅ Lab testing & proof of concepts
+- ✅ Internal security testing
+- ❌ Production deployment (wait for v2.0)
 
 ---
 
