@@ -1,0 +1,46 @@
+# VENOM Enterprise Profile
+# Compliance-focused, low-intensity, detailed reporting
+
+[scan]
+name = "enterprise"
+description = "Enterprise scanning with compliance focus"
+intensity = "light"
+timeout_secs = 300
+rate_limit_rps = 10
+concurrent_workers = 4
+
+[plugins]
+enabled = [
+    "sqli_plugin",
+    "xss_plugin",
+    "lfi_plugin",
+]
+
+[lua_scripts]
+enabled = [
+    "compliance_check",
+    "risk_assessment",
+]
+
+[event_bus]
+subscriptions = [
+    "finding_found",
+    "scan_completed",
+]
+
+[compliance]
+frameworks = ["gdpr", "hipaa", "soc2", "pci_dss"]
+audit_logging = true
+data_classification = true
+
+[reporting]
+format = "pdf"
+include_evidence = true
+include_compliance_mapping = true
+include_remediation = true
+
+[options]
+report_format = "pdf"
+include_compliance = "true"
+include_audit_log = "true"
+waf_detection = "true"

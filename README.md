@@ -7,7 +7,7 @@
 
 > **VENOM v1.0.0** — Comprehensive pentesting framework with MITM proxy, multi-phase scanner, plugin system, Lua scripting, event bus, and compliance support.
 
-**Status:** v1.0.0 ALPHA | Experimental | Not Production-Ready | 19,100+ Lines Rust | 573+ Tests | 37 Modules | Security/Performance Review Needed
+**Status:** v0.9.0 ALPHA | Experimental | Not Production-Ready | 18,465 Lines Rust | 46 Modules | 118 Commits | Security/Performance Review Needed
 
 **⚠️ STABILITY LEVELS:**
 - 🟢 **STABLE** — MITM Proxy, Core Phases (1-6), Plugin System, API Gateway
@@ -719,14 +719,13 @@ venom/
 ```
 
 **Stats:**
-- **Language:** Rust (2021 edition) + React/TypeScript
-- **Total Lines of Code:** 22,100+ lines
-  - Backend (Rust): 19,100+ lines (scanner + 17 TIERs complete)
-  - Frontend (React/TypeScript): 3,000+ lines
-- **Total Test Cases:** 573+ comprehensive tests (100% passing)
-  - Unit tests: 264 tests (all core modules)
-  - Integration tests: 309 tests (TIER 7-17 + phases)
-- **Modules:** 37 core scanner modules (3 extensibility + 8 plugin + 26 base) + 33+ platform modules
+- **Language:** Rust (2021 edition)
+- **Total Lines of Code:** 18,465 lines
+  - Source: 12,921 lines (scanner core + 17 TIERs)
+  - Tests: 5,544 lines (unit + integration)
+- **Test Coverage:** 46 modules, 16 test files, 100% passing rate
+- **Repository:** 118 git commits (all pushed to GitHub)
+- **Architecture:** Modular design (46 core modules, 15 dependencies)
 - **CLI Commands:** 40+
 - **Concurrent Workers:** 
   - Single node: 100+ concurrent requests (Tokio async)

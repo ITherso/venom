@@ -1,0 +1,65 @@
+# VENOM Aggressive Profile
+# Fast, comprehensive scanning with all features enabled
+
+[scan]
+name = "aggressive"
+description = "Fast, comprehensive scanning with all features"
+intensity = "aggressive"
+timeout_secs = 180
+rate_limit_rps = 100
+concurrent_workers = 32
+
+[plugins]
+enabled = [
+    "sqli_plugin",
+    "xss_plugin",
+    "lfi_plugin",
+    "xxe_plugin",
+    "ssrf_plugin",
+    "ssti_plugin",
+]
+
+[lua_scripts]
+enabled = [
+    "aggressive_scan",
+    "waf_bypass",
+    "exploit_chain",
+    "post_exploitation",
+]
+
+[event_bus]
+subscriptions = [
+    "finding_found",
+    "worker_finished",
+    "plugin_executed",
+    "phase_started",
+    "phase_completed",
+]
+
+[scanning]
+all_phases_enabled = true
+payload_mutations = true
+timing_based_detection = true
+error_based_detection = true
+blind_injection_detection = true
+
+[post_exploitation]
+enabled = true
+persistence_check = true
+lateral_movement_check = true
+privilege_escalation_check = true
+
+[ml_engine]
+enabled = true
+pattern_learning = true
+anomaly_detection = true
+exploit_chain_building = true
+
+[options]
+waf_detection = "true"
+waf_bypass = "true"
+fuzzing_level = "high"
+payload_obfuscation = "medium"
+include_dos_payloads = "false"
+include_destructive = "false"
+max_request_size = "65536"

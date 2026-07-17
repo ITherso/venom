@@ -1,0 +1,55 @@
+# VENOM Cloud Profile
+# Optimized for cloud infrastructure scanning
+
+[scan]
+name = "cloud"
+description = "Cloud infrastructure scanning (AWS/GCP/Azure)"
+intensity = "aggressive"
+timeout_secs = 600
+rate_limit_rps = 50
+concurrent_workers = 16
+
+[plugins]
+enabled = [
+    "sqli_plugin",
+    "xss_plugin",
+    "ssrf_plugin",
+    "lfi_plugin",
+    "xxe_plugin",
+]
+
+[lua_scripts]
+enabled = [
+    "cloud_config_check",
+    "api_security",
+    "cloud_metadata_scan",
+]
+
+[event_bus]
+subscriptions = [
+    "finding_found",
+    "worker_finished",
+    "plugin_executed",
+]
+
+[cloud_detection]
+aws = true
+gcp = true
+azure = true
+kubernetes = true
+
+[targets]
+metadata_endpoints = [
+    "http://169.254.169.254/latest/meta-data",
+    "http://metadata.google.internal/",
+    "http://169.254.169.254/metadata/v1/",
+]
+
+[options]
+aws_detection = "true"
+gcp_detection = "true"
+azure_detection = "true"
+check_bucket_permissions = "true"
+check_iam_roles = "true"
+check_api_keys = "true"
+waf_detection = "false"
