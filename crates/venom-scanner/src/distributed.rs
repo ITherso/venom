@@ -180,6 +180,19 @@ pub enum TaskStatus {
     Failed,
 }
 
+impl ScanTask {
+    /// Check if task exceeded TTL (Time To Live)
+    pub fn is_expired(&self, now_secs: u64, ttl_secs: u64) -> bool {
+        let age = now_secs.saturating_sub(self.created_at);
+        age > ttl_secs
+    }
+
+    /// Get task age in seconds
+    pub fn age_secs(&self, now_secs: u64) -> u64 {
+        now_secs.saturating_sub(self.created_at)
+    }
+}
+
 impl TaskStatus {
     pub fn as_str(&self) -> &str {
         match self {
@@ -376,6 +389,49 @@ impl WorkerPool {
         } else {
             false
         }
+    }
+
+    /// Expire tasks that exceed TTL (Time To Live)
+    /// Returns count of expired tasks
+    /// Must be called periodically (e.g., every 60 seconds)
+    pub fn expire_old_tasks(&self, ttl_secs: u64) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut expired = 0;
+
+        // Collect task IDs to expire (avoid DashMap borrow issues)
+        let mut tasks_to_expire = Vec::new();
+        for entry in self.task_queue.tasks.iter() {
+            if entry.value().is_expired(now, ttl_secs) {
+                tasks_to_expire.push(entry.key().clone());
+            }
+        }
+
+        // Expire collected tasks
+        for task_id in tasks_to_expire {
+            if let Some(mut task) = self.task_queue.get_task(&task_id) {
+                // Only expire if not already completed/failed
+                if !matches!(task.status, TaskStatus::Completed | TaskStatus::Failed) {
+                    // Release from worker if assigned
+                    if let Some(worker_id) = task.assigned_to.clone() {
+                        if let Some(mut worker) = self.workers.get_mut(&worker_id) {
+                            worker.current_tasks = worker.current_tasks.saturating_sub(1);
+                        }
+                    }
+
+                    // Mark as failed due to TTL
+                    task.status = TaskStatus::Failed;
+                    task.completed_at = Some(now);
+                    self.task_queue.update_task(task);
+                    expired += 1;
+                }
+            }
+        }
+
+        expired
     }
 
     pub fn worker_count(&self) -> usize {
@@ -1174,5 +1230,176 @@ mod tests {
         assert!(!retry4);
         let t = queue.get_task("t1").unwrap();
         assert_eq!(t.status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn test_task_is_expired_fresh() {
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: 1000,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        let ttl_secs = 86400;  // 24 hours
+        let now = 1000 + 3600;  // 1 hour later
+
+        // Task should NOT be expired (1 hour < 24 hours)
+        assert!(!task.is_expired(now, ttl_secs));
+    }
+
+    #[test]
+    fn test_task_is_expired_exceeded() {
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1, 2],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: 1000,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        let ttl_secs = 86400;  // 24 hours
+        let now = 1000 + 259200;  // 3 days later (259200 seconds)
+
+        // Task SHOULD be expired (3 days > 24 hours)
+        assert!(task.is_expired(now, ttl_secs));
+    }
+
+    #[test]
+    fn test_task_age_secs() {
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: 1000,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        let now = 2000;  // 1000 seconds later
+        assert_eq!(task.age_secs(now), 1000);
+
+        let now = 1500;  // 500 seconds later
+        assert_eq!(task.age_secs(now), 500);
+
+        let now = 1000;  // Same time
+        assert_eq!(task.age_secs(now), 0);
+    }
+
+    #[test]
+    fn test_expire_old_tasks() {
+        let pool = WorkerPool::new();
+        let ttl_secs = 3600;  // 1 hour TTL
+        let base_time = 1000u64;
+
+        // Fresh task (should NOT expire)
+        let fresh = ScanTask {
+            task_id: "t_fresh".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: base_time,
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        // Old task (should expire)
+        let old = ScanTask {
+            task_id: "t_old".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1],
+            assigned_to: None,
+            status: TaskStatus::Queued,
+            created_at: base_time - 7200,  // 2 hours old (> 1 hour TTL)
+            started_at: None,
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        pool.task_queue.enqueue(fresh);
+        pool.task_queue.enqueue(old);
+
+        // Run expiration at base_time
+        let expired = pool.expire_old_tasks(ttl_secs);
+        assert_eq!(expired, 1);  // Only old task expired
+
+        // Verify fresh still queued
+        let fresh_task = pool.task_queue.get_task("t_fresh").unwrap();
+        assert_eq!(fresh_task.status, TaskStatus::Queued);
+
+        // Verify old is failed
+        let old_task = pool.task_queue.get_task("t_old").unwrap();
+        assert_eq!(old_task.status, TaskStatus::Failed);
+        assert!(old_task.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_expire_tasks_release_worker() {
+        let pool = WorkerPool::new();
+        let worker = WorkerNode {
+            worker_id: "w1".to_string(),
+            hostname: "scanner-1".to_string(),
+            address: "192.168.1.10".to_string(),
+            port: 8000,
+            status: WorkerStatus::Healthy,
+            capacity: 10,
+            current_tasks: 1,  // Has task assigned
+            completed_tasks: 0,
+            last_heartbeat: 1000,
+            cpu_utilization: 30.0,
+            memory_utilization: 40.0,
+            network_utilization: 20.0,
+        };
+
+        pool.register_worker(worker);
+
+        let task = ScanTask {
+            task_id: "t1".to_string(),
+            scan_id: "s1".to_string(),
+            target: "example.com".to_string(),
+            phases: vec![1],
+            assigned_to: Some("w1".to_string()),  // Assigned to worker
+            status: TaskStatus::Running,
+            created_at: 1000 - 7200,  // 2 hours old (expires with 1h TTL)
+            started_at: Some(1000),
+            completed_at: None,
+            priority: TaskPriority::Normal,
+            retry_count: 0,
+        };
+
+        pool.task_queue.enqueue(task);
+
+        // Worker has 1 task before expiration
+        assert_eq!(pool.get_workers()[0].current_tasks, 1);
+
+        // Expire old tasks
+        pool.expire_old_tasks(3600);  // 1 hour TTL
+
+        // Worker should be freed (0 tasks)
+        assert_eq!(pool.get_workers()[0].current_tasks, 0);
     }
 }
