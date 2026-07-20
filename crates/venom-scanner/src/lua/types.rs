@@ -127,6 +127,43 @@ pub struct LuaScript {
     pub status: LuaScriptStatus,
 }
 
+impl LuaScript {
+    /// Create new Lua script with path validation (P0 security)
+    pub fn new_safe(
+        name: impl Into<String>,
+        script_path: impl AsRef<std::path::Path>,
+        script_root: &std::path::Path,
+    ) -> Result<Self, String> {
+        let path_buf = PathBuf::from(script_path.as_ref());
+
+        let canonical_script = path_buf.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize script path: {}", e))?;
+        let canonical_root = script_root.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize root path: {}", e))?;
+
+        if !canonical_script.starts_with(&canonical_root) {
+            return Err(format!(
+                "Path traversal detected: {} is outside root {}",
+                canonical_script.display(),
+                canonical_root.display()
+            ));
+        }
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            author: "Unknown".to_string(),
+            script_path: canonical_script,
+            categories: vec![],
+            enabled: true,
+            timeout_ms: 5000,
+            status: LuaScriptStatus::Loaded,
+        })
+    }
+}
+
 /// Lua script execution context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LuaContext {
