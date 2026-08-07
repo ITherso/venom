@@ -32,7 +32,7 @@ http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "rustls-tls"] }
 rustls = { version = "0.23", features = ["ring", "std"] }
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 rcgen = "0.12"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
