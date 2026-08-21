@@ -1,12 +1,14 @@
-//! Activation corpus for the `venom decision-scan` preview runtime.
+//! Activation corpus for the deterministic `venom scan` preview runtime.
 //!
 //! This is a **deterministic characterization corpus**, not a full golden of every
 //! field. It changes no production runtime behavior, planner action, reasoning
 //! rule, verification rule, executor route, threshold, semantic/defense
 //! integration, payload binding, API-reasoning default, or CLI output. It drives
 //! the existing [`StandardWebDecisionRuntime`] through a **manually mirrored
-//! snapshot of the current `venom decision-scan` preview profile** (see
+//! snapshot of the current `venom scan` preview profile** (also exposed through
+//! the deprecated `decision-scan` alias; see
 //! `preview_runtime` below and `crates/venom-cli/src/decision_scan.rs`) against
+
 //! offline `127.0.0.1` fixtures, and records the observable contract: emitted
 //! evidence predicates, resulting hypotheses, strength, and lifecycle state, per-turn
 //! eligible/excluded planner actions with the exact exclusion reason, the actions
@@ -63,6 +65,8 @@
 //! `Allow` header present on the response so the route *review* has its documented
 //! signal — rather than inventing an `Allow` -> Laravel rule.
 
+#![cfg(feature = "scanning")]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,10 +83,10 @@ use venom_scanner::{
     StandardWebDecisionRuntime,
 };
 
-// --- Preview profile: manually mirrored snapshot of the decision-scan preview --
+// --- Preview profile: manually mirrored snapshot of deterministic `scan` ---
 //
 // These constants and `preview_runtime` are a MANUALLY MIRRORED SNAPSHOT of the
-// current `venom decision-scan` preview profile in
+// current `venom scan` preview profile in
 // `crates/venom-cli/src/decision_scan.rs`. They are not shared code and are not
 // identical "by construction" — this milestone deliberately introduces no public
 // config API. Any change to the CLI preview profile (budget, body capture,
@@ -94,7 +98,7 @@ const PREVIEW_MAX_WALL_TIME_SECS: u64 = 60;
 const PREVIEW_MAX_CUMULATIVE_RESPONSE_BYTES: u64 = 1024 * 1024;
 const PREVIEW_BODY_SAMPLE_CHARS: usize = 8_192;
 
-/// Builds a runtime from the manually mirrored snapshot of the decision-scan
+/// Builds a runtime from the manually mirrored snapshot of the deterministic scan
 /// preview profile. See the module and section notes on the sync obligation.
 fn preview_runtime(target: Url) -> StandardWebDecisionRuntime {
     let policy = HttpEvidencePolicy::for_origin(target.clone())
@@ -1489,7 +1493,7 @@ async fn cumulative_response_budget_accounting_across_multiple_requests() {
     // and each probe's charge is bounded near the 256 KiB per-probe cap. When the
     // transport delivers large chunks (typical un-instrumented Linux/Windows runs)
     // three probes charge ~1.2 MiB and cross the budget -> RuntimeBudgetLimit; when
-    // it delivers small chunks (e.g. a ptrace-instrumented coverage run) three
+    // it delivers small chunks (e.g. an instrumented coverage run) three
     // probes charge ~0.8 MiB, stay under budget, and the route defers to human
     // review. Both are controlled terminations. No threshold is changed.
     //

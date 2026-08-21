@@ -7,7 +7,7 @@ Architecture decision records (ADRs) preserve why a durable technical choice was
 | ADR | Status | Decision |
 | --- | --- | --- |
 | [0001](0001-use-workspace.md) | Accepted | Use a Cargo workspace with inward dependencies |
-| [0002](0002-plugin-boundary.md) | Accepted | Keep plugins behind a source-level Rust trait boundary |
+| [0002](0002-plugin-boundary.md) | Partially superseded by [0019](0019-host-own-plugin-execution.md) | Keep plugins behind a source-level Rust trait boundary |
 | [0003](0003-event-bus.md) | Accepted | Separate core event contracts from scanner event delivery |
 | [0004](0004-reasoning-runtime-boundary.md) | Accepted | Keep deterministic reasoning inward of execution and runtime |
 | [0005](0005-shared-predicate-vocabulary.md) | Accepted | Share predicate vocabulary through venom-core |
@@ -19,8 +19,15 @@ Architecture decision records (ADRs) preserve why a durable technical choice was
 | [0011](0011-version-api-explanation-semantics.md) | Accepted | Version API explanation semantics |
 | [0012](0012-account-delivered-transport-bytes.md) | Accepted | Account delivered transport bytes at the broker boundary |
 | [0013](0013-runtime-owned-api-visibility-pairs.md) | Accepted | Run authorized API visibility pairs as a runtime-owned workflow |
-| [0014](0014-runtime-truth-consolidation.md) | Accepted | Consolidate runtime truth into three named surfaces |
-| [0015](0015-platform-shell-boundary.md) | Accepted | Classify the platform shell by execution reality |
+| [0014](0014-runtime-truth-consolidation.md) | Superseded by 0017 | Consolidate runtime truth into three named surfaces |
+| [0015](0015-platform-shell-boundary.md) | Build inventory superseded by [0020](0020-quarantine-platform-and-distribution-surfaces.md); classification axes retained | Classify the platform shell by execution reality |
+| [0016](0016-bound-legacy-discovery-authority.md) | Accepted; phase 5–9 inventory superseded by 0018 | Bound legacy discovery behind a shared authority |
+| [0017](0017-make-deterministic-scan-the-default.md) | Accepted | Make the deterministic runtime the canonical `scan` command |
+| [0018](0018-bound-legacy-verification-authority.md) | Accepted | Bound legacy verification behind a separate active authority |
+| [0019](0019-host-own-plugin-execution.md) | Accepted | Make plugin execution host-owned and evidence-only |
+| [0020](0020-quarantine-platform-and-distribution-surfaces.md) | Accepted; reporting clause superseded by 0021, Lua/distributed clauses by 0022 | Quarantine platform and distribution surfaces |
+| [0021](0021-render-bounded-run-reports.md) | Accepted | Render bounded typed run reports without adding verdict authority |
+| [0022](0022-bound-host-lua-and-distributed-execution.md) | Accepted | Bound host-owned Lua execution and process-local coordination |
 
 ## Format
 

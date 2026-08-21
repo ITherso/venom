@@ -2,11 +2,10 @@
 //!
 //! ## Runtime scope
 //!
-//! - **Build:** always/default.
-//! - **Execution:** shared runtime support used by Surface A and/or Surface B
-//!   (`ScanRunner` drives `ScanPhase` and aggregates `ScanFinding`).
-//! - **Default `venom scan`:** yes, as shared runtime support; not an independent execution stage.
-//! - **Support:** implemented.
+//! - **Build:** non-default `legacy-scanner` feature.
+//! - **Execution:** Surface A contract used by the historical `ScanRunner`.
+//! - **Default `venom scan`:** no.
+//! - **Support:** legacy alpha.
 //!
 //! See `docs/internals/runtime-map.md`.
 
@@ -18,6 +17,13 @@ pub use venom_core::ScanFinding;
 ///
 /// Implementations contain detection logic only. Scheduling, cancellation,
 /// event publication, and aggregation remain runner responsibilities.
+///
+/// Implementations must structurally own any child work they start. Dropping
+/// the future returned by [`ScanPhase::execute`] must stop its child requests
+/// and shared-state mutations; detached tasks violate this contract. The
+/// runner structurally owns and can drop only the outer `execute` future. Its
+/// panic boundary likewise covers only panics that unwind while polling that
+/// future, not detached work or `panic = "abort"` builds.
 ///
 /// # Examples
 ///

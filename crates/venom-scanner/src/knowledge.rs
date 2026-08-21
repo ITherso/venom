@@ -3,11 +3,11 @@
 //! ## Runtime scope
 //!
 //! - **Build:** always/default.
-//! - **Execution:** `ScanContext` constructs and privately owns a `KnowledgeBase`
-//!   on Surface A, but the current legacy phases do not consume it (construction
-//!   is not active use); Surface B actively uses it as deterministic reasoning
-//!   state.
-//! - **Default `venom scan`:** no (constructed but not consumed by the phases).
+//! - **Execution:** Surface B uses the base as deterministic reasoning state.
+//!   Surface A's opt-in legacy runner also records bounded probe receipts and
+//!   verifier-owned manual-review outcomes from phases 5, 7, 8, and 9.
+//! - **Default `venom scan`:** yes, through Surface B; legacy knowledge writes
+//!   require the explicit `legacy-scan` path and its acknowledgement flag.
 //! - **Support:** implemented and tested.
 //!
 //! See `docs/internals/runtime-map.md`.
@@ -29,6 +29,27 @@ use venom_core::{
     KnowledgePredicate, KnowledgeRelation, Ontology, OntologyAxiom, OntologyConcept, OntologyError,
     OntologyRelationType, OntologyStats, OntologyWrite, RelationId, RelationKind, RelationTypeId,
 };
+
+/// Opaque, process-local identity shared by one knowledge base and its snapshots.
+///
+/// The identity is deliberately neither serialized nor exposed publicly. It
+/// prevents a snapshot or verifier receipt produced by one in-memory authority
+/// from being committed to a different authority that happens to contain the
+/// same records and revision counters.
+#[derive(Clone, Default)]
+pub(crate) struct KnowledgeAuthority(Arc<()>);
+
+impl KnowledgeAuthority {
+    pub(crate) fn is_same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl fmt::Debug for KnowledgeAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("KnowledgeAuthority(<opaque>)")
+    }
+}
 
 /// Hard byte ceiling for one stored knowledge-relation identifier.
 pub const MAX_KNOWLEDGE_RELATION_ID_BYTES: usize = 512;
@@ -101,6 +122,12 @@ impl fmt::Display for KnowledgeRecordKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KnowledgeBaseError {
+    /// A snapshot or commit token was minted by another knowledge-base instance.
+    SnapshotAuthorityMismatch {
+        /// Subject whose snapshot authority did not match this knowledge base.
+        subject: EntityId,
+    },
+
     /// The identity exists, but its immutable claim or graph identity differs.
     IdentityConflict {
         /// Category of the conflicting record.
@@ -161,11 +188,45 @@ pub enum KnowledgeBaseError {
         /// Subject declared by the hypothesis.
         actual: EntityId,
     },
+
+    /// A derived evidence record referenced a parent that neither already
+    /// exists nor appears in the same atomic batch.
+    MissingDerivationParent {
+        /// Derived child evidence ID.
+        child: String,
+        /// Referenced parent evidence ID that could not be resolved.
+        parent: String,
+    },
+
+    /// A derived evidence record referenced itself as a parent.
+    SelfDerivation {
+        /// Evidence ID that referenced itself.
+        evidence_id: String,
+    },
+
+    /// A derived evidence record referenced a parent recorded for a different
+    /// subject.
+    DerivationSubjectMismatch {
+        /// Derived child evidence ID.
+        child: String,
+        /// Referenced parent evidence ID.
+        parent: String,
+    },
+
+    /// The derivation edges in one atomic batch formed a cycle.
+    DerivationCycle {
+        /// One evidence ID participating in the detected cycle.
+        evidence_id: String,
+    },
 }
 
 impl fmt::Display for KnowledgeBaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SnapshotAuthorityMismatch { subject } => write!(
+                formatter,
+                "knowledge snapshot for {subject} belongs to a different knowledge base"
+            ),
             Self::IdentityConflict { kind, id } => {
                 write!(
                     formatter,
@@ -213,6 +274,22 @@ impl fmt::Display for KnowledgeBaseError {
                 formatter,
                 "reasoning hypothesis {hypothesis_id} belongs to {actual}, expected snapshot subject {expected}"
             ),
+            Self::MissingDerivationParent { child, parent } => write!(
+                formatter,
+                "derived evidence {child} references parent {parent} that is neither stored nor in the same batch"
+            ),
+            Self::SelfDerivation { evidence_id } => write!(
+                formatter,
+                "derived evidence {evidence_id} references itself as a parent"
+            ),
+            Self::DerivationSubjectMismatch { child, parent } => write!(
+                formatter,
+                "derived evidence {child} references parent {parent} recorded for a different subject"
+            ),
+            Self::DerivationCycle { evidence_id } => write!(
+                formatter,
+                "derivation lineage forms a cycle through evidence {evidence_id}"
+            ),
         }
     }
 }
@@ -243,6 +320,7 @@ pub struct KnowledgeBaseStats {
 /// cycle observes the same ontology, evidence, facts, and hypotheses.
 #[derive(Debug, Clone)]
 pub struct KnowledgeSnapshot {
+    authority: KnowledgeAuthority,
     subject: EntityId,
     subject_revision: u64,
     ontology_revision: u64,
@@ -288,8 +366,13 @@ impl KnowledgeSnapshot {
         &self.ontology
     }
 
+    pub(crate) fn authority(&self) -> &KnowledgeAuthority {
+        &self.authority
+    }
+
     pub(crate) fn with_evidence_correlation(&self, correlation_id: &str) -> Self {
         Self {
+            authority: self.authority.clone(),
             subject: self.subject.clone(),
             subject_revision: self.subject_revision,
             ontology_revision: self.ontology_revision,
@@ -332,6 +415,9 @@ struct KnowledgeState {
     relations: HashMap<RelationId, KnowledgeRelation>,
     evidence_by_subject: HashMap<EntityId, BTreeSet<EvidenceId>>,
     evidence_by_predicate: HashMap<KnowledgePredicate, BTreeSet<EvidenceId>>,
+    /// Reverse derivation lineage: parent evidence ID -> derived child IDs.
+    /// Forward lineage (child -> parents) is carried by each record's origin.
+    derivation_children: HashMap<EvidenceId, BTreeSet<EvidenceId>>,
     facts_by_subject: HashMap<EntityId, BTreeSet<String>>,
     facts_by_predicate: HashMap<KnowledgePredicate, BTreeSet<String>>,
     hypotheses_by_subject: HashMap<EntityId, BTreeSet<String>>,
@@ -381,6 +467,7 @@ struct KnowledgeState {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct KnowledgeBase {
+    authority: KnowledgeAuthority,
     state: Arc<RwLock<KnowledgeState>>,
 }
 
@@ -503,6 +590,13 @@ impl KnowledgeBase {
             };
         }
 
+        if evidence.origin().derivation().is_some() {
+            let mut pending = HashMap::with_capacity(1);
+            pending.insert(id.clone(), evidence.clone());
+            validate_batch_derivations(&state, &pending)?;
+        }
+
+        index_derivation(&mut state, &evidence);
         state.evidence.insert(id.clone(), evidence);
         bump_subject_revision(&mut state, &subject);
         index(&mut state.evidence_by_subject, subject, id.clone());
@@ -541,6 +635,11 @@ impl KnowledgeBase {
                 .or_insert_with(|| observation.clone());
         }
 
+        // Lineage is validated across the whole batch before any write, so a
+        // missing parent, self-reference, cross-subject parent, or cycle rejects
+        // the complete batch without leaving an orphaned child or index entry.
+        validate_batch_derivations(&state, &pending)?;
+
         let mut writes = Vec::with_capacity(evidence.len());
         for observation in evidence {
             let id = observation.id().clone();
@@ -551,6 +650,7 @@ impl KnowledgeBase {
 
             let subject = observation.subject().clone();
             let predicate = observation.predicate().clone();
+            index_derivation(&mut state, &observation);
             state.evidence.insert(id.clone(), observation);
             bump_subject_revision(&mut state, &subject);
             index(&mut state.evidence_by_subject, subject, id.clone());
@@ -558,6 +658,17 @@ impl KnowledgeBase {
             writes.push(KnowledgeWrite::Inserted);
         }
         Ok(writes)
+    }
+
+    /// Returns the derived evidence records computed directly from `parent`,
+    /// ordered by evidence ID. Forward lineage (a derived record's exact
+    /// parents) is read from that record's [`venom_core::EvidenceOrigin`].
+    pub fn derivation_children(&self, parent: &EvidenceId) -> BTreeSet<EvidenceId> {
+        self.read_state()
+            .derivation_children
+            .get(parent)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Atomically inserts one immutable observation and its sole graph edge.
@@ -739,6 +850,9 @@ impl KnowledgeBase {
         preserve_terminal_state: bool,
         expected_snapshot: Option<&KnowledgeSnapshot>,
     ) -> Result<Vec<KnowledgeWrite>, KnowledgeBaseError> {
+        if let Some(snapshot) = expected_snapshot {
+            self.validate_snapshot_authority(snapshot.authority(), snapshot.subject())?;
+        }
         let mut state = self.write_state();
         if let Some(snapshot) = expected_snapshot {
             let actual_subject_revision = subject_revision(&state, snapshot.subject());
@@ -1077,6 +1191,7 @@ impl KnowledgeBase {
     pub fn snapshot_for_subject(&self, subject: &EntityId) -> KnowledgeSnapshot {
         let state = self.read_state();
         KnowledgeSnapshot {
+            authority: self.authority.clone(),
             subject: subject.clone(),
             subject_revision: subject_revision(&state, subject),
             ontology_revision: state.ontology_revision,
@@ -1106,6 +1221,21 @@ impl KnowledgeBase {
         )
     }
 
+    /// Rejects a snapshot token minted by a different in-memory knowledge base.
+    pub(crate) fn validate_snapshot_authority(
+        &self,
+        authority: &KnowledgeAuthority,
+        subject: &EntityId,
+    ) -> Result<(), KnowledgeBaseError> {
+        if self.authority.is_same_as(authority) {
+            Ok(())
+        } else {
+            Err(KnowledgeBaseError::SnapshotAuthorityMismatch {
+                subject: subject.clone(),
+            })
+        }
+    }
+
     /// Runs a short external commit only while a snapshot remains current.
     ///
     /// The read lock stays held for the callback, preventing knowledge writers
@@ -1118,6 +1248,7 @@ impl KnowledgeBase {
         snapshot: &KnowledgeSnapshot,
         commit: impl FnOnce() -> T,
     ) -> Result<T, KnowledgeBaseError> {
+        self.validate_snapshot_authority(snapshot.authority(), snapshot.subject())?;
         let state = self.read_state();
         validate_revisions(
             &state,
@@ -1170,6 +1301,130 @@ fn identity_conflict(kind: KnowledgeRecordKind, id: &impl fmt::Display) -> Knowl
     KnowledgeBaseError::IdentityConflict {
         kind,
         id: id.to_string(),
+    }
+}
+
+/// Validates derivation lineage for one atomic batch before any record is
+/// written. `pending` holds every distinct record in the batch keyed by ID; a
+/// parent reference may resolve to `pending` (same batch) or to the committed
+/// store. Structural validity (non-empty, de-duplicated, bounded parents) is
+/// already guaranteed by [`venom_core::EvidenceDerivation`]; the checks that
+/// require store context are enforced here: self-reference, parent existence,
+/// subject agreement, and cycle freedom. Any violation returns before the write
+/// phase, so the batch is rejected without mutating the knowledge base.
+fn validate_batch_derivations(
+    state: &KnowledgeState,
+    pending: &HashMap<EvidenceId, Evidence>,
+) -> Result<(), KnowledgeBaseError> {
+    for (child_id, child) in pending {
+        let Some(derivation) = child.origin().derivation() else {
+            continue;
+        };
+        for parent in derivation.parents() {
+            if parent == child_id {
+                return Err(KnowledgeBaseError::SelfDerivation {
+                    evidence_id: child_id.to_string(),
+                });
+            }
+            let parent_subject = pending
+                .get(parent)
+                .map(Evidence::subject)
+                .or_else(|| state.evidence.get(parent).map(Evidence::subject));
+            let Some(parent_subject) = parent_subject else {
+                return Err(KnowledgeBaseError::MissingDerivationParent {
+                    child: child_id.to_string(),
+                    parent: parent.to_string(),
+                });
+            };
+            if parent_subject != child.subject() {
+                return Err(KnowledgeBaseError::DerivationSubjectMismatch {
+                    child: child_id.to_string(),
+                    parent: parent.to_string(),
+                });
+            }
+        }
+    }
+    detect_batch_derivation_cycles(pending)
+}
+
+/// Iterative three-color DFS over batch-local derivation edges. Committed store
+/// records are terminals: the store is an immutable DAG whose records precede
+/// every batch record, so a new cycle can only form among records in this
+/// batch. Traversal is explicit-stack (never recursive) and bounded by the
+/// batch size times the per-record parent bound.
+fn detect_batch_derivation_cycles(
+    pending: &HashMap<EvidenceId, Evidence>,
+) -> Result<(), KnowledgeBaseError> {
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let adjacency: HashMap<EvidenceId, Vec<EvidenceId>> = pending
+        .iter()
+        .map(|(id, evidence)| {
+            let parents = evidence
+                .origin()
+                .derivation()
+                .map(|derivation| {
+                    derivation
+                        .parents()
+                        .iter()
+                        .filter(|parent| pending.contains_key(*parent))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (id.clone(), parents)
+        })
+        .collect();
+    let mut color: HashMap<EvidenceId, Color> = pending
+        .keys()
+        .map(|id| (id.clone(), Color::White))
+        .collect();
+    for start in pending.keys() {
+        if !matches!(color.get(start), Some(Color::White)) {
+            continue;
+        }
+        color.insert(start.clone(), Color::Gray);
+        let mut stack: Vec<(EvidenceId, usize)> = vec![(start.clone(), 0)];
+        while let Some((node, index)) = stack.last().cloned() {
+            let neighbors = &adjacency[&node];
+            if index < neighbors.len() {
+                stack.last_mut().unwrap().1 = index + 1;
+                let next = neighbors[index].clone();
+                match color.get(&next) {
+                    Some(Color::Gray) => {
+                        return Err(KnowledgeBaseError::DerivationCycle {
+                            evidence_id: next.to_string(),
+                        });
+                    },
+                    Some(Color::White) => {
+                        color.insert(next.clone(), Color::Gray);
+                        stack.push((next, 0));
+                    },
+                    _ => {},
+                }
+            } else {
+                color.insert(node, Color::Black);
+                stack.pop();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Records the reverse derivation edges for one newly inserted derived record.
+fn index_derivation(state: &mut KnowledgeState, evidence: &Evidence) {
+    if let Some(derivation) = evidence.origin().derivation() {
+        let child = evidence.id().clone();
+        for parent in derivation.parents() {
+            state
+                .derivation_children
+                .entry(parent.clone())
+                .or_default()
+                .insert(child.clone());
+        }
     }
 }
 
@@ -1297,9 +1552,18 @@ where
 mod tests {
     use super::*;
     use venom_core::{
-        BayesianEvidence, ConfidenceScore, EntityKind, EvidenceKind, EvidenceSource, EvidenceValue,
-        HypothesisState, HypothesisStrength, Probability, RelationKind,
+        BayesianEvidence, ConfidenceScore, DerivationAlgorithm, EntityKind, EvidenceDerivation,
+        EvidenceKind, EvidenceSource, EvidenceValue, HypothesisState, HypothesisStrength,
+        Probability, RelationKind,
     };
+
+    fn derivation_algorithm() -> DerivationAlgorithm {
+        DerivationAlgorithm::new("http.form-control-names", 1).unwrap()
+    }
+
+    fn derived(child: Evidence, parents: impl IntoIterator<Item = EvidenceId>) -> Evidence {
+        child.derived_from(EvidenceDerivation::new(parents, derivation_algorithm()).unwrap())
+    }
 
     fn subject(id: usize) -> EntityId {
         EntityId::new(format!("endpoint:https://example.test/{id}")).unwrap()
@@ -1359,6 +1623,181 @@ mod tests {
             })
         );
         assert_eq!(store.stats().evidence, 1);
+    }
+
+    #[test]
+    fn derived_evidence_retains_exact_parent_forward_and_reverse() {
+        let store = KnowledgeBase::new();
+        let parent = evidence_for(subject(1), "body-sample");
+        let parent_id = parent.id().clone();
+        store.insert_evidence(parent).unwrap();
+
+        let child = derived(
+            evidence_for(subject(1), "form-controls"),
+            [parent_id.clone()],
+        );
+        let child_id = child.id().clone();
+        assert_eq!(
+            store.insert_evidence(child).unwrap(),
+            KnowledgeWrite::Inserted
+        );
+
+        let stored = store.evidence(&child_id).unwrap();
+        assert_eq!(
+            stored.origin().derivation().unwrap().parents(),
+            std::slice::from_ref(&parent_id)
+        );
+        assert!(store.derivation_children(&parent_id).contains(&child_id));
+        // A direct sibling has no lineage.
+        assert!(store.derivation_children(&child_id).is_empty());
+    }
+
+    #[test]
+    fn same_batch_parent_after_child_in_order_is_valid() {
+        let store = KnowledgeBase::new();
+        let parent = evidence_for(subject(1), "body-sample");
+        let parent_id = parent.id().clone();
+        let child = derived(
+            evidence_for(subject(1), "form-controls"),
+            [parent_id.clone()],
+        );
+        let child_id = child.id().clone();
+
+        // Child appears BEFORE its parent in input order; acceptance must not
+        // depend on order.
+        let writes = store.insert_evidence_batch(vec![child, parent]).unwrap();
+        assert_eq!(
+            writes,
+            vec![KnowledgeWrite::Inserted, KnowledgeWrite::Inserted]
+        );
+        assert!(store.derivation_children(&parent_id).contains(&child_id));
+    }
+
+    #[test]
+    fn missing_parent_rejects_the_whole_batch_without_writing() {
+        let store = KnowledgeBase::new();
+        let ghost = EvidenceId::parse("does-not-exist").unwrap();
+        let child = derived(evidence_for(subject(1), "form-controls"), [ghost]);
+        let sibling = evidence_for(subject(1), "sibling");
+        assert!(matches!(
+            store.insert_evidence_batch(vec![sibling, child]),
+            Err(KnowledgeBaseError::MissingDerivationParent { .. })
+        ));
+        assert_eq!(store.stats().evidence, 0);
+    }
+
+    #[test]
+    fn self_referencing_derivation_is_rejected() {
+        let store = KnowledgeBase::new();
+        let base = evidence_for(subject(1), "self");
+        let id = base.id().clone();
+        let child = derived(base, [id]);
+        assert!(matches!(
+            store.insert_evidence(child),
+            Err(KnowledgeBaseError::SelfDerivation { .. })
+        ));
+        assert_eq!(store.stats().evidence, 0);
+    }
+
+    #[test]
+    fn two_node_cycle_in_one_batch_is_rejected_atomically() {
+        let store = KnowledgeBase::new();
+        let a = evidence_for(subject(1), "a");
+        let b = evidence_for(subject(1), "b");
+        let a_id = a.id().clone();
+        let b_id = b.id().clone();
+        let a_cyclic = derived(a, [b_id]);
+        let b_cyclic = derived(b, [a_id]);
+        assert!(matches!(
+            store.insert_evidence_batch(vec![a_cyclic, b_cyclic]),
+            Err(KnowledgeBaseError::DerivationCycle { .. })
+        ));
+        assert_eq!(store.stats().evidence, 0);
+    }
+
+    #[test]
+    fn cross_subject_parent_is_rejected() {
+        let store = KnowledgeBase::new();
+        let parent = evidence_for(subject(1), "body-sample");
+        let parent_id = parent.id().clone();
+        store.insert_evidence(parent).unwrap();
+
+        let child = derived(evidence_for(subject(2), "form-controls"), [parent_id]);
+        assert!(matches!(
+            store.insert_evidence(child),
+            Err(KnowledgeBaseError::DerivationSubjectMismatch { .. })
+        ));
+        assert_eq!(store.stats().evidence, 1);
+    }
+
+    #[test]
+    fn conflicting_lineage_for_existing_child_is_an_identity_conflict() {
+        let store = KnowledgeBase::new();
+        let p1 = evidence_for(subject(1), "p1");
+        let p2 = evidence_for(subject(1), "p2");
+        let p1_id = p1.id().clone();
+        let p2_id = p2.id().clone();
+        store.insert_evidence_batch(vec![p1, p2]).unwrap();
+
+        let base = evidence_for(subject(1), "child");
+        let child_id = base.id().clone();
+        let via_p1 = base
+            .clone()
+            .derived_from(EvidenceDerivation::new([p1_id], derivation_algorithm()).unwrap());
+        let via_p2 =
+            base.derived_from(EvidenceDerivation::new([p2_id], derivation_algorithm()).unwrap());
+
+        assert_eq!(
+            store.insert_evidence(via_p1).unwrap(),
+            KnowledgeWrite::Inserted
+        );
+        assert_eq!(
+            store.insert_evidence(via_p2),
+            Err(KnowledgeBaseError::IdentityConflict {
+                kind: KnowledgeRecordKind::Evidence,
+                id: child_id.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn reusing_a_direct_id_as_derived_is_an_identity_conflict() {
+        let store = KnowledgeBase::new();
+        let parent = evidence_for(subject(1), "parent");
+        let parent_id = parent.id().clone();
+        store.insert_evidence(parent).unwrap();
+
+        let direct = evidence_for(subject(1), "record");
+        let id = direct.id().clone();
+        store.insert_evidence(direct.clone()).unwrap();
+
+        let as_derived = direct
+            .derived_from(EvidenceDerivation::new([parent_id], derivation_algorithm()).unwrap());
+        assert_eq!(
+            store.insert_evidence(as_derived),
+            Err(KnowledgeBaseError::IdentityConflict {
+                kind: KnowledgeRecordKind::Evidence,
+                id: id.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn exact_derived_record_reinserts_idempotently() {
+        let store = KnowledgeBase::new();
+        let parent = evidence_for(subject(1), "parent");
+        let parent_id = parent.id().clone();
+        store.insert_evidence(parent).unwrap();
+
+        let child = derived(evidence_for(subject(1), "child"), [parent_id]);
+        assert_eq!(
+            store.insert_evidence(child.clone()).unwrap(),
+            KnowledgeWrite::Inserted
+        );
+        assert_eq!(
+            store.insert_evidence(child).unwrap(),
+            KnowledgeWrite::Unchanged
+        );
     }
 
     #[test]
@@ -1423,8 +1862,38 @@ mod tests {
                 .unwrap(),
             (KnowledgeWrite::Unchanged, KnowledgeWrite::Unchanged)
         );
-        assert_eq!(store.relations_from(observation.subject()), vec![relation]);
+        assert_eq!(
+            store.relations_from(observation.subject()),
+            vec![relation.clone()]
+        );
         assert_eq!(store.relations_to(&resource).len(), 1);
+
+        let updated_relation = KnowledgeRelation::with_id(
+            relation.id().clone(),
+            relation.from().clone(),
+            relation.to().clone(),
+            relation.kind().clone(),
+            ConfidenceScore::from_percent(90).unwrap(),
+            observation.id().clone(),
+        );
+        assert_eq!(
+            store
+                .insert_evidence_with_relation(observation.clone(), updated_relation.clone())
+                .unwrap(),
+            (KnowledgeWrite::Unchanged, KnowledgeWrite::Updated)
+        );
+        assert_eq!(
+            store.relations_from(observation.subject()),
+            vec![updated_relation.clone()]
+        );
+        assert_eq!(
+            store.relations_to(&resource),
+            vec![updated_relation.clone()]
+        );
+        assert_eq!(
+            store.relation(updated_relation.id()),
+            Some(updated_relation)
+        );
 
         let unrelated = evidence_for(subject(2), "other");
         let mismatched = KnowledgeRelation::new(

@@ -1,49 +1,59 @@
-//! Composable scanning contracts and execution behavior for Venom.
+//! Deterministic evidence, reasoning, planning, execution, and verification for
+//! Venom's scanner runtime.
 //!
-//! The crate exposes two extension surfaces:
-//!
-//! - [`ScannerSdk`] composes application-defined [`ScanPhase`] values;
-//! - `Plugin` defines the source-level Preview plugin contract when the
-//!   `plugins` feature is enabled.
+//! The default `scanning` feature contains the bounded decision runtime used by
+//! `venom scan`. The historical ordered phase runner and Scanner SDK are
+//! available only through the non-default `legacy-scanner` feature. Native
+//! plugins remain a separate source-level Preview contract under `plugins`.
 //!
 //! [`KnowledgeBase`] separates ontology, instance knowledge, and observations
 //! without coupling evidence producers to decision policy.
-//!
-//! The runner owns ordering, timeouts, cancellation, event publication, and
-//! finding aggregation. Extensions own detection behavior.
-//!
-//! # Scanner SDK
-//!
-//! ```rust,no_run
-//! use venom_scanner::ScannerSdk;
-//!
-//! # async fn run() -> venom_scanner::Result<()> {
-//! let scanner = ScannerSdk::builder().build();
-//! let report = scanner.scan("https://example.test").await?;
-//! assert!(report.findings.is_empty());
-//! # Ok(())
-//! # }
-//! ```
 
+#![forbid(unsafe_code)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
-// Core modules (always compiled)
+#[cfg(all(feature = "legacy-scanner", panic = "abort"))]
+const _: () = panic!(
+    "the legacy-scanner feature requires panic=unwind so panics while polling phase execution become typed run failures"
+);
+
+#[cfg(all(feature = "plugins", panic = "abort"))]
+const _: () = panic!(
+    "the plugins feature requires panic=unwind so plugin panics become typed invocation failures"
+);
+
+// Deterministic core modules
+#[cfg(feature = "platform-models")]
 pub mod api;
 pub mod api_evidence;
+#[cfg(feature = "platform-models")]
 pub mod api_gateway;
 pub mod api_observation;
 pub mod api_reasoning;
+#[cfg(feature = "platform-models")]
 pub mod auth;
+#[cfg(feature = "platform-models")]
 pub mod cache;
+#[cfg(feature = "platform-models")]
 pub mod config;
+#[cfg(feature = "platform-models")]
 pub mod config_loader;
+#[cfg(feature = "legacy-scanner")]
 pub mod context;
+#[cfg(feature = "legacy-scanner")]
 pub mod contracts;
 pub mod defense;
+#[cfg(feature = "legacy-scanner")]
 pub mod error;
 pub mod experience;
 pub mod knowledge;
+#[cfg(feature = "legacy-scanner")]
+mod legacy_discovery;
+#[cfg(feature = "legacy-scanner")]
 pub mod logging;
+#[cfg(any(feature = "platform-models", feature = "lua"))]
+mod lua_config;
+#[cfg(feature = "platform-models")]
 pub mod metrics;
 pub mod payload_strategies;
 pub mod payload_strategy;
@@ -61,18 +71,15 @@ pub use semantic::{
     SemanticExtractionLimits, SemanticExtractionResult,
 };
 
-// Scanning engine (feature: scanning)
-#[cfg(feature = "scanning")]
+// Historical ordered scanner (feature: legacy-scanner)
+#[cfg(feature = "legacy-scanner")]
 pub mod phases;
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "legacy-scanner")]
 pub mod runner;
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "legacy-scanner")]
 pub mod sdk;
-
-#[cfg(feature = "scanning")]
-pub mod waf;
 
 #[cfg(feature = "scanning")]
 pub mod adaptive;
@@ -98,67 +105,64 @@ pub mod web_decision;
 #[cfg(feature = "scanning")]
 pub mod web_runtime;
 
-// Detection capabilities (feature: detection)
+// Experimental detection and deviation records (feature: detection)
 #[cfg(feature = "detection")]
 pub mod advanced_detection;
 
 #[cfg(feature = "detection")]
 pub mod anomaly;
 
-// Machine learning (feature: ml)
+// External-model record types only (feature: ml)
 #[cfg(feature = "ml")]
 pub mod ml;
 
-// Distributed scaling (feature: distributed)
+// Experimental bounded in-process coordinator (feature: distributed)
 #[cfg(feature = "distributed")]
-pub mod distributed;
+mod distributed;
 
-// Monitoring (feature: monitoring)
+// Caller-supplied measurement records (feature: monitoring)
 #[cfg(feature = "monitoring")]
 pub mod monitoring;
 
-// Compliance (feature: compliance)
+// Compliance and audit record catalogs (feature: compliance)
 #[cfg(feature = "compliance")]
 pub mod compliance;
 
-// Threat intelligence (feature: threat-intel)
+// Offline threat record catalogs (feature: threat-intel)
 #[cfg(feature = "threat-intel")]
 pub mod threat_intelligence;
 
-// Post-exploitation (included with scanning)
-#[cfg(feature = "scanning")]
+// Unwired platform models (feature: platform-models)
+#[cfg(feature = "platform-models")]
 pub mod post_exploitation;
 
 // Plugin system (feature: plugins)
 #[cfg(feature = "plugins")]
 pub mod plugin;
 
-#[cfg(feature = "plugins")]
-pub mod plugins;
+#[cfg(feature = "lua")]
+mod lua_engine;
 
-#[cfg(feature = "plugins")]
-pub mod lua_engine;
-
-// Persistence & reporting (included with scanning)
-#[cfg(feature = "scanning")]
+#[cfg(feature = "platform-models")]
 pub mod persistence;
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "reporting")]
 pub mod reporting;
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "platform-models")]
 pub mod realtime;
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "platform-models")]
 pub mod dashboard;
 
-// Event bus (included with core for observability)
+// Historical host event bus (legacy scanner only)
+#[cfg(feature = "legacy-scanner")]
 pub mod event_bus;
 
-// Core exports (always available)
+// Opt-in platform-model exports
+#[cfg(feature = "platform-models")]
 pub use api::{
-    ApiEndpoints, ApiError, ApiResponse, ScanResultResponse, ScanStatus, ScanStatusType,
-    StartScanRequest,
+    ApiError, ApiResponse, ScanResultResponse, ScanStatus, ScanStatusType, StartScanRequest,
 };
 pub use api_evidence::{
     ApiComparisonProfile, ApiVisibilityComparator, ApiVisibilityEvidenceError, ApiVisibilityLimits,
@@ -174,10 +178,8 @@ pub use api_evidence::{
     HARD_MAX_API_VISIBILITY_DIFF_PATHS, HARD_MAX_API_VISIBILITY_FIELDS,
     HARD_MAX_API_VISIBILITY_NODES,
 };
-pub use api_gateway::{
-    ApiGateway, ApiQuota, QuotaManager, RateLimitPolicy, RateLimitStatus, RateLimitStrategy,
-    RateLimiter, RequestValidationResult, RouteConfig, TokenBucket,
-};
+#[cfg(feature = "platform-models")]
+pub use api_gateway::{ApiQuota, RateLimitPolicy, RateLimitStatus, RateLimitStrategy, RouteConfig};
 pub use api_observation::{
     api_visibility_reviews_for_resource, api_visibility_reviews_for_resource_v2,
     ingest_api_visibility_observation, ApiObservationCommitReceipt, ApiObservationError,
@@ -191,12 +193,18 @@ pub use api_reasoning::{
     StandardApiInstallReport, StandardApiReasoning, StandardApiReasoningError,
     STANDARD_API_AXIOM_COUNT, STANDARD_API_CONCEPT_COUNT, STANDARD_API_RULE_COUNT,
 };
-pub use auth::{AuthToken, LoginRequest, LoginResponse, User, UserInfo, UserManager, UserRole};
-pub use cache::{CacheEntry, CacheStats, LruCache, ResponseCache};
+#[cfg(feature = "platform-models")]
+pub use auth::{User, UserRole};
+#[cfg(feature = "platform-models")]
+pub use cache::{CacheStats, LruCache};
+#[cfg(feature = "platform-models")]
 pub use config::{ScanConfig, ScanIntensity};
+#[cfg(feature = "platform-models")]
 pub use config_loader::{ConfigLoader, ScanProfile as ScanningProfile};
+#[cfg(feature = "legacy-scanner")]
 pub use context::ScanContext;
-pub use contracts::{ScanFinding, ScanPhase};
+#[cfg(feature = "legacy-scanner")]
+pub use contracts::ScanPhase;
 pub use defense::{
     defense_aware_plan, defense_aware_shadow_plan, DefenseAwareShadowPlan, DefenseFingerprint,
     DefenseInteractionClass, DefenseObservationContext, DefensePlanningPolicy, DefensePosture,
@@ -205,7 +213,9 @@ pub use defense::{
     PlanAdjustment, PostureShift, ResourceDefenseObservation, ResourceDefenseSignal,
     ShadowPlanDelta, SuppressedAction, MAX_FINGERPRINT_BODY_SCAN_BYTES,
 };
+#[cfg(feature = "legacy-scanner")]
 pub use error::{Result, ScannerError};
+#[cfg(feature = "legacy-scanner")]
 pub use event_bus::{Event, EventBuilder, EventBus, EventHandler, EventSeverity, EventType};
 pub use experience::{
     ExperienceAssessment, ExperienceDisposition, ExperiencePolicy, ExperienceRecommendation,
@@ -219,11 +229,19 @@ pub use knowledge::{
     MAX_KNOWLEDGE_RELATION_EVIDENCE_ID_BYTES, MAX_KNOWLEDGE_RELATION_ID_BYTES,
     MAX_KNOWLEDGE_RELATION_KIND_BYTES,
 };
+#[cfg(feature = "legacy-scanner")]
+pub use legacy_discovery::{
+    DiscoveryForm, DiscoveryFormMethod, DiscoveryLimits, VerificationLimits,
+};
+#[cfg(feature = "legacy-scanner")]
 pub use logging::{LogEntry, LogLevel, Logger};
+#[cfg(any(feature = "platform-models", feature = "lua"))]
+pub use lua_config::{LuaConfigError, LuaConfigViolation, LuaEngineConfig};
+#[cfg(feature = "platform-models")]
 pub use metrics::{MetricsCollector, MetricsSummary, PhaseMetrics};
 pub use payload_strategies::{
-    standard_payload_strategies, ApiAuthorizationContextPairStrategy, EvasionTechnique,
-    HttpHeaderControlPairStrategy, API_AUTHORIZATION_CONTEXT_PAIR_HEADER_NAME,
+    standard_payload_strategies, ApiAuthorizationContextPairStrategy,
+    HttpHeaderControlPairStrategy, PayloadEncoding, API_AUTHORIZATION_CONTEXT_PAIR_HEADER_NAME,
     API_AUTHORIZATION_CONTEXT_PAIR_ID, API_AUTHORIZATION_CONTEXT_PAIR_REVISION,
     HTTP_HEADER_CONTROL_PAIR_HEADER_NAME, HTTP_HEADER_CONTROL_PAIR_ID,
     HTTP_HEADER_CONTROL_PAIR_REVISION,
@@ -245,10 +263,16 @@ pub use rules::{
     ExpressionTrace, HypothesisConclusion, KnowledgeLayer, ReasoningRule, RuleApplication,
     RuleEngine, RuleEngineError, RuleEvaluation, RuleWrite,
 };
+#[cfg(any(feature = "legacy-scanner", feature = "platform-models"))]
+pub use venom_core::ScanFinding;
 pub use venom_core::{
     ApiSurfaceKind, ApiVisibilityComparison, ApiVisibilityDimension, ApiVisibilityObservation,
-    ApiVisibilityPairKind, ApiVisibilityResult, ConfidenceScore, EntityId, Outcome, OutcomeError,
-    OutcomeStatus, VerificationStage,
+    ApiVisibilityPairKind, ApiVisibilityResult, ConfidenceScore, EntityId, EvidenceKind,
+    EvidenceValue, KnowledgePredicate, Outcome, OutcomeError, OutcomeStatus, ResourceAccounting,
+    ResourceAccountingMode, RunAccounting, RunOutcomeRecord, RunReport, RunReportError,
+    RunReportInput, RunStatus, RunStepReport, RunStepStatus, RunStopCode, RunStopReason,
+    SecuritySeverity, VerificationStage, MAX_RUN_REPORT_EVIDENCE_IDS, MAX_RUN_REPORT_OUTCOMES,
+    MAX_RUN_REPORT_STEPS, MAX_RUN_REPORT_TEXT_BYTES, RUN_REPORT_SCHEMA,
 };
 pub use verification::{
     apply_outcome, ActiveVerifier, PassiveVerifier, VerificationCase, VerificationError,
@@ -271,24 +295,19 @@ pub use web_verification::{
     StandardWebVerificationProfile, STANDARD_WEB_VERIFICATION_RULE_COUNT,
 };
 
-// Scanning engine exports (feature: scanning)
+// Historical ordered scanner exports (feature: legacy-scanner)
 // Note: phases module is re-exported automatically
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "legacy-scanner")]
 pub use runner::ScanRunner;
 
-#[cfg(feature = "scanning")]
-pub use sdk::{ScanReport, ScannerBuilder, ScannerSdk};
-
-#[cfg(feature = "scanning")]
-pub use waf::{EvisionTechnique, PayloadEncoder, WafDetector, WafProduct};
+#[cfg(feature = "legacy-scanner")]
+pub use sdk::{ScannerBuilder, ScannerSdk};
 
 #[cfg(feature = "scanning")]
 pub use adaptive::{
-    AdaptationLedger, AdaptationLimits, AdaptationRule, AdaptationRuleEvaluation,
-    AdaptationStrategy, AdaptiveDecision, AdaptiveEngine, AdaptivePipeline, AdaptivePipelineError,
-    AdaptiveRuleWrite, DetectionPattern, OutcomeSelector, PayloadMutator, PipelineDirective,
-    ResponseMetrics,
+    AdaptationLedger, AdaptationLimits, AdaptationRule, AdaptationRuleEvaluation, AdaptiveDecision,
+    AdaptivePipeline, AdaptivePipelineError, AdaptiveRuleWrite, OutcomeSelector, PipelineDirective,
 };
 
 #[cfg(feature = "scanning")]
@@ -347,92 +366,100 @@ pub use web_runtime::{
 };
 
 #[cfg(all(feature = "scanning", feature = "plugins"))]
-pub use decision_runner::{PluginDecisionExecutor, PluginExecutionInput, PluginInputProvider};
+pub use decision_runner::{PluginDecisionExecutor, PluginExecutionRequestProvider};
 
-#[cfg(feature = "scanning")]
+#[cfg(feature = "platform-models")]
 pub use persistence::{
-    ColumnDef, ConnectionPool, DbConfig, EndpointRecord, EntityType, FindingRecord, IndexDef,
-    QueryBuilder, QueryResult, ScanRecord, SchemaManager, TableSchema, Transaction,
-    TransactionManager, TransactionStatus,
+    ColumnDef, EndpointRecord, EntityType, FindingRecord, IndexDef, ScanRecord, SchemaManager,
+    TableSchema,
 };
 
-#[cfg(feature = "scanning")]
-pub use post_exploitation::{
-    ExploitPayload, LateralTarget, PayloadType, PersistenceMechanism, PersistenceTechnique,
-    PostExploitSession, PostExploitationManager, PrivilegeLevel, ReverseShell, Webshell,
+#[cfg(feature = "platform-models")]
+pub use post_exploitation::{AssessmentObservation, ObservationDisposition};
+
+#[cfg(feature = "reporting")]
+pub use reporting::{
+    ReportError, ReportFormat, ReportGenerator, MAX_RENDERED_REPORT_BYTES, REPORT_DOCUMENT_SCHEMA,
 };
 
-#[cfg(feature = "scanning")]
-pub use reporting::{ReportFormat, ReportGenerator, VulnerabilityReport};
+#[cfg(feature = "platform-models")]
+pub use realtime::{EventStream, RealtimeEvent, RealtimeEventValidationError, Subscription};
 
-#[cfg(feature = "scanning")]
-pub use realtime::{ConnectionManager, EventStream, RealtimeEvent, Subscription};
-
-#[cfg(feature = "scanning")]
+#[cfg(feature = "platform-models")]
 pub use dashboard::{
-    DashboardConfig, DashboardOverview, DashboardService, FindingCard, FindingStatus, ScanCard,
-    WidgetType,
+    DashboardConfig, DashboardOverview, FindingCard, FindingStatus, ScanCard, WidgetType,
 };
 
-// Detection exports (feature: detection)
+// Experimental detection and deviation record exports (feature: detection)
 #[cfg(feature = "detection")]
 pub use advanced_detection::{
-    BehaviorIndicator, BehavioralAnalysisData, BehavioralAnalyzer, BehavioralSignature,
-    BypassCategory, ComparisonOperator, DetectionResult, EversionRule, EversionType, IndicatorType,
-    SignatureEvasionEngine, WafBypassSelector, WafBypassTechnique,
+    BehaviorIndicator, BehavioralAnalysisData, BehavioralSignature,
+    BehavioralSignatureValidationError, CatalogRecordError, ComparisonOperator, IndicatorType,
+    TechniqueCatalog, TechniqueCategory, TechniqueRecord, TransformationRule,
+    TransformationRuleCatalog, TransformationType,
 };
 
 #[cfg(feature = "detection")]
-pub use anomaly::{AnomalyDetector, AnomalyInterpreter, AnomalyScore, ResponseData, SeverityClass};
-
-// Machine learning exports (feature: ml)
-#[cfg(feature = "ml")]
-pub use ml::{
-    AnomalyClassifier, AnomalyPattern, AnomalyType, ClusterResult, ExploitBuilder, ExploitStage,
-    ExploitationChain, PatternLearner, VulnerabilityPattern,
+pub use anomaly::{
+    DeviationDimension, ErrorKeywordMatcher, ResponseDeviation, ResponseDeviationValidationError,
 };
 
-// Distributed scaling exports (feature: distributed)
+// External-model record exports (feature: ml)
+#[cfg(feature = "ml")]
+pub use ml::{
+    AnomalyPattern, AnomalyType, ClusterResult, ExploitStage, ExploitationChain,
+    MlRecordValidationError, VulnerabilityPattern,
+};
+
+// Deterministic in-process coordination exports (feature: distributed)
 #[cfg(feature = "distributed")]
 pub use distributed::{
-    ResultAggregator, ScanTask, TaskPriority, TaskQueue, TaskStatus, WorkerNode, WorkerPool,
-    WorkerStatus,
+    AggregatedResult, CancellationOutcome, CompletionOutcome, CompletionReceipt, DistributedError,
+    DistributedLimits, FailureOutcome, QueuedTaskFence, RecoverySummary, ResultAggregator,
+    ResultLimits, ScanTask, StartOutcome, StateSnapshot, StoreResultOutcome, TaskLease,
+    TaskOwnership, TaskPriority, TaskQueue, TaskSpec, TaskStatus, Transition, WorkerNode,
+    WorkerObservation, WorkerPool, WorkerSpec, WorkerStatus, WorkerTag, MAX_ACTIVE_TASKS,
+    MAX_AGGREGATE_ITEMS, MAX_HEARTBEAT_TIMEOUT_SECS, MAX_IDENTIFIER_BYTES, MAX_LEASE_TTL_SECS,
+    MAX_RESULTS, MAX_RESULT_BYTES, MAX_RETRIES, MAX_TARGET_REF_BYTES, MAX_TASK_PHASES,
+    MAX_TASK_RECORDS, MAX_TASK_TTL_SECS, MAX_TOTAL_RESULT_BYTES, MAX_WORKERS, MAX_WORKER_CAPACITY,
+    MAX_WORKER_TAGS, UTILIZATION_BASIS_POINTS,
 };
 
 // Monitoring exports (feature: monitoring)
 #[cfg(feature = "monitoring")]
 pub use monitoring::{
-    BenchmarkResult, BenchmarkSuite, OptimizationRecommendation, PerformanceAnalyzer, PhaseProfile,
-    RecommendationCategory, ResourceMetrics, ScanComparison, ScanProfile,
+    BenchmarkResult, BenchmarkSuite, CountComparison, DurationComparison, PerformanceAnalyzer,
+    PhaseProfile, ResourceMetrics, ScanComparison, ScanProfile,
 };
 
 // Compliance exports (feature: compliance)
 #[cfg(feature = "compliance")]
 pub use compliance::{
-    AuditEventType, AuditLogEntry, AuditLogger, ComplianceAssessment, ComplianceAssessor,
-    ComplianceFramework, ComplianceReport, ComplianceReporter, ComplianceRequirement,
-    DataClassification, DataProtectionManager, DataProtectionRecord,
+    AuditEventType, AuditLogEntry, AuditTrail, ComplianceAssessment, ComplianceCatalog,
+    ComplianceFramework, ComplianceReport, ComplianceReportCatalog, ComplianceRequirement,
+    DataClassification, DataProtectionCatalog, DataProtectionRecord,
 };
 
 // Threat intelligence exports (feature: threat-intel)
 #[cfg(feature = "threat-intel")]
 pub use threat_intelligence::{
-    AlertAction, AlertEngine, AlertRule, CVECorrelator, CVERecord, SecurityAlert,
-    ThreatActorProfile, ThreatFeedEntry, ThreatFeedManager, ThreatFeedSource,
-    ThreatIntelligenceRepo, ThreatSeverity,
+    AlertAction, AlertEvaluation, AlertRule, AlertRuleCatalog, CVERecord, CveCatalog,
+    InvalidCvssScore, ThreatActorCatalog, ThreatActorProfile, ThreatFeedCatalog, ThreatFeedEntry,
+    ThreatFeedSource, ThreatSeverity,
 };
 
 // Plugin system exports (feature: plugins)
 #[cfg(feature = "plugins")]
 pub use plugin::{
-    Plugin, PluginCategory, PluginConfig, PluginError, PluginExecutionResult, PluginMetadata,
-    PluginRegistry, PLUGIN_API_VERSION,
+    Plugin, PluginBudget, PluginCategory, PluginConfig, PluginContext, PluginError,
+    PluginExecutionRequest, PluginExecutionResult, PluginHttpMethod, PluginHttpRequest,
+    PluginHttpResponse, PluginMetadata, PluginObservation, PluginRedactionPolicy, PluginRegistry,
+    PluginRequestBroker, PluginUsage, SecretRedactionPolicy, PLUGIN_API_VERSION,
 };
 
-#[cfg(feature = "plugins")]
-pub use plugins::{LFIPlugin, SQLiPlugin, SSRFPlugin, SSTIPlugin, XSSPlugin, XXEPlugin};
-
-#[cfg(feature = "plugins")]
+#[cfg(feature = "lua")]
 pub use lua_engine::{
-    LuaContext, LuaExecutionResult, LuaScript, LuaScriptRegistry, LuaScriptStatus,
+    LuaCancellationToken, LuaContext, LuaExecutionError, LuaExecutionReceipt, LuaExecutionResult,
+    LuaExecutionStatus, LuaRegistrationError, LuaRegistryError, LuaReturnValue, LuaScript,
+    LuaScriptManifest, LuaScriptRegistry, ScriptCategory,
 };

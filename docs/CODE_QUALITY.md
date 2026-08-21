@@ -10,8 +10,8 @@ alpha production-ready or prove that a scanner result is correct.
 crates/
 ├─ venom-core/src/          transport-neutral contracts and types
 ├─ venom-scanner/src/       runtime, reasoning, phases, and plugins
-├─ venom-proxy/src/         HTTP/TLS proxy boundary
-├─ venom-api/src/           application transport
+├─ venom-proxy/src/         experimental fixed-upstream TCP relay
+├─ venom-api/src/           health router / unsupported listener hook
 └─ venom-cli/src/           composition root
 examples/src/               compiled SDK examples
 xtask/src/                  repository maintenance commands
@@ -64,7 +64,7 @@ cargo test -p venom-scanner --no-default-features --lib --locked
 cargo test -p venom-scanner --all-features runtime_budget
 ```
 
-See [Testing](TESTING.md) for service-backed tests, deterministic reasoning
+See [Testing](TESTING.md) for loopback integration tests, deterministic reasoning
 fixtures, fuzzing, coverage, and runtime-accounting expectations.
 
 ## Public API documentation
@@ -130,10 +130,15 @@ only tracked Rust files owned by workspace packages. Neither source-line count
 nor test count is a quality score.
 
 Coverage, benchmark, and fuzz results must include the commit, toolchain,
-configuration, bounded workload, and artifact provenance. The repository does
-not claim a current minimum coverage percentage or production performance SLA.
-See [Quality metrics](quality-metrics.md), [Benchmarks](benchmarks.md), and
-[Fuzzing](fuzzing.md).
+configuration, bounded workload, and artifact provenance. The accepted coverage
+record captures the exact measurement-Rust/installer-Rust/Tarpaulin/LLVM-engine
+contract, `Cargo.lock` and Cobertura digests, a normalized line-state digest,
+aggregate and per-file integer counts, omissions, and workflow artifact
+provenance. CI enforces its exact aggregate ratio of 21,439/24,842 on both the
+repository scope and coverable changed lines; the ratio is a regression floor,
+not a test-adequacy claim. See [Coverage evidence](reports/coverage/README.md),
+[Quality metrics](quality-metrics.md), [Benchmarks](benchmarks.md), and
+[Fuzzing](fuzzing.md). The repository also makes no production performance SLA.
 
 ## Review checklist
 

@@ -6,8 +6,8 @@ Venom is security-testing software. Its alpha releases may contain defects that 
 
 | Version | Supported | Notes |
 | --- | --- | --- |
-| `main` | Yes | Security fixes land here first |
-| `0.9.0-alpha` | Yes | Best-effort support until the next pre-release |
+| `main` / unreleased `0.10.0-alpha.1` source line | Yes | Security fixes land here first; identify reports by full commit SHA |
+| Historical `v0.9.0-alpha` artifacts | No | Predate the remediated runtime; build a reviewed current commit instead |
 | Earlier snapshots | No | Upgrade before reporting a defect |
 
 Support means the maintainers will assess valid reports; it does not imply a production-readiness guarantee.
@@ -66,9 +66,20 @@ No researchers are listed yet.
 
 Reports about the following are particularly useful:
 
-- proxy certificate or key handling;
+- fixed-upstream relay scope validation, cancellation, or resource handling;
 - authentication and authorization bypass;
-- unsafe Lua or plugin sandbox escape;
+- Lua approved-root/path/source-snapshot validation, VM allowlist, memory,
+  instruction, timeout, cancellation, output/return, concurrency, or history
+  limit defects. Lua execution uses cooperative in-process controls, not
+  process isolation: parser, allocator,
+  and native work cannot be hard-preempted, dropping an execution future does
+  not stop detached blocking work, and the unkeyed source digest plus timing
+  receipts are linkable sensitive metadata;
+- distributed revision, logical-time, queue/record/result bound, lease,
+  retry/recovery, terminal replay, or result-receipt defects. Its structural
+  tokens are not authenticated or cross-instance replay-resistant, and its
+  per-instance retained-data limits are not a total process-memory guarantee;
+- trusted in-process plugin budget, redaction, provenance, or broker-capability enforcement defects;
 - request smuggling or parser differentials;
 - secret exposure in logs or reports;
 - malicious scan target responses causing code execution, denial of service, or data exposure;

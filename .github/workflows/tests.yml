@@ -11,6 +11,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  distribution-contracts:
+    name: Distribution Contracts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build default CLI container
+        run: docker build --tag venom:ci .
+      - name: Verify container contract
+        run: sh tests/distribution/container-contract.sh venom:ci
+
   architecture:
     name: Architecture Boundaries
     runs-on: ubuntu-latest
@@ -38,33 +50,29 @@ jobs:
         run: cargo test --lib --verbose
       - name: Run doc tests
         run: cargo test --doc --verbose
+      - name: Verify default and opt-in CLI contracts
+        run: |
+          cargo test --locked -p venom-cli --no-default-features
+          cargo test --locked -p venom-cli --no-default-features --features legacy-scanner
+          cargo test --locked -p venom-cli --no-default-features --features api-adapter
+          cargo test --locked -p venom-cli --no-default-features --features proxy-adapter
+      - name: Verify scanner feature boundaries independently
+        run: |
+          set -euo pipefail
+          for feature in \
+            core scanning legacy-scanner platform-models reporting detection ml \
+            distributed monitoring compliance threat-intel plugins lua
+          do
+            cargo test --locked -p venom-scanner --no-default-features --features "$feature" --lib --tests
+          done
+          for aggregate in minimal full enterprise research
+          do
+            cargo check --locked -p venom-scanner --no-default-features --features "$aggregate"
+          done
 
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: venom_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-      redis:
-        image: redis:7
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -73,9 +81,6 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Run integration tests
         run: cargo test --test '*' --all-features --verbose
-        env:
-          DATABASE_URL: postgres://test:test@localhost:5432/venom_test
-          REDIS_URL: redis://localhost:6379
 
   plugin-template:
     name: Plugin Template
@@ -127,7 +132,7 @@ jobs:
             "$scanner_dir/Cargo.toml" \
             "$scanner_dir/README.md"
           sed -i \
-            "s#venom-scanner = .*#venom-scanner = { path = \"${GITHUB_WORKSPACE}/crates/venom-scanner\", default-features = false, features = [\"scanning\"] }#" \
+            "s#venom-scanner = .*#venom-scanner = { path = \"${GITHUB_WORKSPACE}/crates/venom-scanner\", default-features = false, features = [\"legacy-scanner\"] }#" \
             "$scanner_dir/Cargo.toml"
           cargo test --manifest-path "$scanner_dir/Cargo.toml"
 
@@ -150,21 +155,50 @@ jobs:
   code-coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          toolchain: stable
+          toolchain: "1.88.0"
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
+      - name: Test coverage policy checker
+        run: python3 -m unittest discover -s scripts/tests -p 'test_coverage_gate.py'
+      - name: Install pinned tarpaulin
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          cargo +1.91.0 install cargo-tarpaulin --version 0.37.2 --locked
       - name: Generate coverage
-        run: cargo tarpaulin --all-features --out Xml --exclude-files tests/ --timeout 300
-      - name: Upload coverage
+        run: cargo +1.88.0 tarpaulin --locked --workspace --all-features --ignore-tests --ignore-config --engine llvm --out Xml --timeout 300
+      - name: Attempt best-effort advisory Codecov upload
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./cobertura.xml
           fail_ci_if_error: false
+      - name: Enforce repository coverage policy
+        env:
+          COVERAGE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          COVERAGE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/coverage_gate.py --cobertura cobertura.xml --baseline-pointer docs/reports/coverage/accepted-baseline.txt --summary-json coverage-summary.json --summary-markdown coverage-summary.md --require-base
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-evidence
+          path: |
+            cobertura.xml
+            coverage-summary.json
+            coverage-summary.md
+          if-no-files-found: error
 
   compatibility:
     name: Rust Compatibility

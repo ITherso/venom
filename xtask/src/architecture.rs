@@ -17,7 +17,10 @@ use syn::{
 };
 
 mod deployment;
+mod platform;
+mod plugin;
 mod reachability;
+mod source_hygiene;
 mod transport;
 mod workflows;
 
@@ -179,6 +182,9 @@ pub(crate) fn check(workspace_root: &Path) -> Result<(), Box<dyn Error>> {
     violations.extend(transport::check(workspace_root)?);
     violations.extend(reachability::check(workspace_root)?);
     violations.extend(deployment::check(workspace_root)?);
+    violations.extend(platform::check(workspace_root)?);
+    violations.extend(source_hygiene::check(workspace_root)?);
+    violations.extend(plugin::check(workspace_root)?);
     violations.extend(workflows::check(workspace_root)?);
     violations.sort();
     violations.dedup();
@@ -341,8 +347,8 @@ fn allowed_workspace_graph() -> BTreeMap<String, BTreeSet<String>> {
     [
         ("venom-core", &[][..]),
         ("venom-scanner", &["venom-core"][..]),
-        ("venom-proxy", &["venom-core"][..]),
-        ("venom-api", &["venom-core", "venom-scanner"][..]),
+        ("venom-proxy", &[][..]),
+        ("venom-api", &[][..]),
         (
             "venom-cli",
             &["venom-api", "venom-core", "venom-proxy", "venom-scanner"][..],
@@ -612,10 +618,21 @@ fn validate_library_root_bindings(syntax: &syn::File) -> Vec<String> {
 
 fn is_allowed_library_attribute(attribute: &Attribute) -> bool {
     let segments = &attribute.path().segments;
-    segments.len() == 1
-        && segments.first().is_some_and(|segment| {
-            ALLOWED_LIBRARY_ATTRIBUTES.contains(&ident_name(&segment.ident).as_str())
-        })
+    if segments.len() != 1 {
+        return false;
+    }
+    let name = segments
+        .first()
+        .map(|segment| ident_name(&segment.ident))
+        .unwrap_or_default();
+    if ALLOWED_LIBRARY_ATTRIBUTES.contains(&name.as_str()) {
+        return true;
+    }
+    name == "forbid"
+        && attribute
+            .meta
+            .require_list()
+            .is_ok_and(|list| list.tokens.to_string() == "unsafe_code")
 }
 
 fn reject_reserved_library_binding(binding: &str, violations: &mut Vec<String>) {
@@ -1514,6 +1531,24 @@ mod tests {
         assert!(violations.contains("declares protected module rules inline"));
         assert!(violations.contains("expose protected module verification"));
         assert!(!violations.contains("experience"));
+    }
+
+    #[test]
+    fn library_root_allows_only_the_safe_rust_forbid_attribute() {
+        let safe = r#"
+            #![forbid(unsafe_code)]
+            pub mod ordinary;
+        "#;
+        assert!(validate_module_wiring(safe, &[]).unwrap().is_empty());
+
+        let unrelated = r#"
+            #![forbid(unused)]
+            pub mod ordinary;
+        "#;
+        assert!(validate_module_wiring(unrelated, &[])
+            .unwrap()
+            .join("\n")
+            .contains("unapproved crate attribute"));
     }
 
     #[test]

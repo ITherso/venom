@@ -1,1886 +1,3255 @@
-//! Lua Script Engine - NSE-style Scripting Support
+//! Bounded, host-owned execution for registered Lua source snapshots.
 //!
-//! ## Runtime scope
+//! This opt-in library surface is not part of either repository CLI runtime.
+//! It creates a fresh Lua 5.4 VM for every request, exposes only immutable
+//! context accessors plus bounded output, and never reopens source after
+//! registration.
 //!
-//! - **Build:** opt-in via `plugins`.
-//! - **Execution:** host/library only; no repository runtime caller.
-//! - **Default `venom scan`:** no.
-//! - **Support:** experimental.
-//!
-//! See `docs/internals/runtime-map.md`.
-//!
-//! Execute Lua scripts for custom scanning logic, similar to Nmap's NSE.
+//! The VM is an in-process cooperative boundary, not process isolation. Lua
+//! instruction hooks interrupt bytecode loops, but cannot hard-preempt a defect
+//! inside the Lua VM or a long native/C operation. This host therefore loads no
+//! standard libraries and exposes no capability-bearing callbacks.
+//! Portable path validation cannot defeat a writer racing changes inside the
+//! approved tree, so that root must remain trusted and non-writable throughout
+//! registration. Later file replacement is harmless because execution uses the
+//! private registration-time snapshot.
 
-use crate::config::LuaEngineConfig;
-use mlua::Lua;
+use crate::lua_config::{LuaConfigError, LuaEngineConfig};
+use mlua::{
+    ChunkMode, Error as MluaError, HookTriggers, Lua, LuaOptions, MultiValue, StdLib, Value,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
+use std::fs::File;
+use std::future::{poll_fn, Future};
+use std::io::Read;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::time::{timeout, Duration};
-use uuid::Uuid;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
-/// Script categories (type-safe, no typos, autocomplete)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+const MAX_SCRIPT_NAME_BYTES: usize = 128;
+const MAX_SCRIPT_VERSION_BYTES: usize = 64;
+const REGISTERED_CHUNK_NAME: &str = "@venom:registered";
+const ABORT_CANCELLED: &str = "venom:cancelled";
+const ABORT_DEADLINE: &str = "venom:deadline";
+const ABORT_INSTRUCTION: &str = "venom:instruction-limit";
+const ABORT_OUTPUT: &str = "venom:output-limit";
+const ABORT_OUTPUT_ENCODING: &str = "venom:output-encoding";
+const ABORT_OUTPUT_TYPE: &str = "venom:output-type";
+const ABORT_OUTPUT_NUMBER: &str = "venom:output-number";
+const IMMUTABLE_CONTEXT: &str = "venom:immutable-context";
+
+/// Script categories used by inert registry metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ScriptCategory {
-    #[serde(rename = "web")]
     Web,
-    #[serde(rename = "dns")]
-    DNS,
-    #[serde(rename = "smb")]
-    SMB,
-    #[serde(rename = "ssh")]
-    SSH,
-    #[serde(rename = "database")]
+    Dns,
+    Smb,
+    Ssh,
     Database,
 }
 
 impl ScriptCategory {
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
-            ScriptCategory::Web => "web",
-            ScriptCategory::DNS => "dns",
-            ScriptCategory::SMB => "smb",
-            ScriptCategory::SSH => "ssh",
-            ScriptCategory::Database => "database",
+            Self::Web => "web",
+            Self::Dns => "dns",
+            Self::Smb => "smb",
+            Self::Ssh => "ssh",
+            Self::Database => "database",
         }
     }
 
-    pub fn all() -> &'static [ScriptCategory] {
-        &[
-            ScriptCategory::Web,
-            ScriptCategory::DNS,
-            ScriptCategory::SMB,
-            ScriptCategory::SSH,
-            ScriptCategory::Database,
-        ]
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[Self::Web, Self::Dns, Self::Smb, Self::Ssh, Self::Database]
     }
 }
 
 impl FromStr for ScriptCategory {
-    type Err = String;
+    type Err = LuaRegistrationError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "web" => Ok(ScriptCategory::Web),
-            "dns" => Ok(ScriptCategory::DNS),
-            "smb" => Ok(ScriptCategory::SMB),
-            "ssh" => Ok(ScriptCategory::SSH),
-            "database" => Ok(ScriptCategory::Database),
-            _ => Err(format!("Unknown category: {}", s)),
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("web") {
+            Ok(Self::Web)
+        } else if value.eq_ignore_ascii_case("dns") {
+            Ok(Self::Dns)
+        } else if value.eq_ignore_ascii_case("smb") {
+            Ok(Self::Smb)
+        } else if value.eq_ignore_ascii_case("ssh") {
+            Ok(Self::Ssh)
+        } else if value.eq_ignore_ascii_case("database") {
+            Ok(Self::Database)
+        } else {
+            Err(LuaRegistrationError::InvalidCategory)
         }
     }
 }
 
-impl std::fmt::Display for ScriptCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+impl fmt::Display for ScriptCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
-/// Script execution status (runtime tracking)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LuaScriptStatus {
-    #[serde(rename = "loaded")]
-    Loaded, // Registered, ready to run
-    #[serde(rename = "running")]
-    Running, // Currently executing
-    #[serde(rename = "completed")]
-    Completed, // Finished successfully
-    #[serde(rename = "failed")]
-    Failed, // Execution error
-    #[serde(rename = "timeout")]
-    Timeout, // Execution exceeded its configured limit
+/// Fixed registration failure that never includes a path, source, or OS error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LuaRegistrationError {
+    InvalidConfig(LuaConfigError),
+    InvalidName,
+    InvalidVersion,
+    InvalidCategory,
+    InvalidPath,
+    OutsideApprovedRoot,
+    SymlinkRejected,
+    NotRegularFile,
+    SourceTooLarge,
+    SourceNotUtf8,
+    SourceChangedDuringRegistration,
+    SourceReadFailed,
 }
 
-impl LuaScriptStatus {
-    pub fn as_str(&self) -> &'static str {
+impl fmt::Display for LuaRegistrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidConfig(_) => "invalid Lua engine configuration",
+            Self::InvalidName => "invalid Lua script name",
+            Self::InvalidVersion => "invalid Lua script version",
+            Self::InvalidCategory => "invalid Lua script category",
+            Self::InvalidPath => "invalid Lua script path",
+            Self::OutsideApprovedRoot => "Lua script is outside the approved root",
+            Self::SymlinkRejected => "Lua script path contains a symbolic link",
+            Self::NotRegularFile => "Lua script source is not a regular file",
+            Self::SourceTooLarge => "Lua script source exceeds its configured limit",
+            Self::SourceNotUtf8 => "Lua script source must be UTF-8 text",
+            Self::SourceChangedDuringRegistration => {
+                "Lua script source changed during registration"
+            },
+            Self::SourceReadFailed => "Lua script source could not be read",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for LuaRegistrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            LuaScriptStatus::Loaded => "loaded",
-            LuaScriptStatus::Running => "running",
-            LuaScriptStatus::Completed => "completed",
-            LuaScriptStatus::Failed => "failed",
-            LuaScriptStatus::Timeout => "timeout",
+            Self::InvalidConfig(error) => Some(error),
+            _ => None,
         }
     }
 }
 
-impl std::fmt::Display for LuaScriptStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+/// Inert, serializable metadata. It cannot be deserialized into execution authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuaScriptManifest {
+    id: String,
+    name: String,
+    version: String,
+    categories: Vec<ScriptCategory>,
+    enabled: bool,
+    source_bytes: u64,
+    source_sha256: String,
+}
+
+impl LuaScriptManifest {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn categories(&self) -> &[ScriptCategory] {
+        &self.categories
+    }
+
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn source_bytes(&self) -> u64 {
+        self.source_bytes
+    }
+
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
     }
 }
 
-/// Immutable script metadata (P1 refactor: single responsibility)
-/// Never changes after script creation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct LuaScriptMetadata {
-    pub id: Uuid,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub author: String,
-    pub script_path: PathBuf,
-    pub categories: Vec<ScriptCategory>,
-    pub timeout_ms: u64,
-}
-
-/// Mutable script instance state (P1 refactor: single responsibility)
-/// Changes during script lifecycle
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LuaScriptInstance {
-    pub metadata: LuaScriptMetadata,
-    pub enabled: bool,
-    pub status: LuaScriptStatus,
-    pub execution_count: u32,
-    pub last_run_time_ms: Option<u64>,
-    pub last_error: Option<String>,
-}
-
-/// Lua script metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Opaque executable source created only through bounded registration.
+#[derive(Clone)]
 pub struct LuaScript {
-    pub id: Uuid, // Unique identifier (prevents duplicate xss.lua conflicts)
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub author: String,
-    pub script_path: PathBuf, // Canonicalized, safe path (prevents ../../../../etc/passwd)
-    pub categories: Vec<ScriptCategory>, // Type-safe: Web, DNS, SMB, SSH, Database (no typos)
-    pub enabled: bool,
-    pub timeout_ms: u64,
-    pub status: LuaScriptStatus, // Runtime status (Loaded → Running → Completed/Failed)
+    name: String,
+    version: String,
+    categories: Vec<ScriptCategory>,
+    enabled: bool,
+    source: Arc<str>,
+    source_bytes: u64,
+    source_digest: [u8; 32],
+}
+
+impl fmt::Debug for LuaScript {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LuaScript")
+            .field("id", &self.id())
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("categories", &self.categories)
+            .field("enabled", &self.enabled)
+            .field("source_bytes", &self.source_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LuaScript {
-    /// Create new Lua script with path validation
-    ///
-    /// # Arguments
-    /// * `name` - Script name
-    /// * `script_path` - Path to script (must be within scripts/ root)
-    /// * `script_root` - Root directory for scripts (e.g., "./scripts/")
-    ///
-    /// # Returns
-    /// * `Ok(LuaScript)` if path is valid and within root
-    /// * `Err(String)` if path traversal or invalid
     pub fn new_safe(
         name: impl Into<String>,
         script_path: impl AsRef<Path>,
-        script_root: &Path,
-    ) -> Result<Self, String> {
-        let path_buf = PathBuf::from(script_path.as_ref());
+        approved_root: &Path,
+    ) -> Result<Self, LuaRegistrationError> {
+        Self::new_safe_with_config(
+            name,
+            script_path,
+            approved_root,
+            &LuaEngineConfig::default(),
+        )
+    }
 
-        // Canonicalize both paths to resolve ../../ and symlinks
-        let canonical_script = path_buf
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize script path: {}", e))?;
-        let canonical_root = script_root
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize root path: {}", e))?;
-
-        // SECURITY: Ensure script is within root directory
-        if !canonical_script.starts_with(&canonical_root) {
-            return Err(format!(
-                "Path traversal detected: {} is outside root {}",
-                canonical_script.display(),
-                canonical_root.display()
-            ));
-        }
-
+    pub fn new_safe_with_config(
+        name: impl Into<String>,
+        script_path: impl AsRef<Path>,
+        approved_root: &Path,
+        config: &LuaEngineConfig,
+    ) -> Result<Self, LuaRegistrationError> {
+        config
+            .validate()
+            .map_err(LuaRegistrationError::InvalidConfig)?;
+        let name = name.into();
+        validate_identifier(&name, MAX_SCRIPT_NAME_BYTES)
+            .map_err(|()| LuaRegistrationError::InvalidName)?;
+        let source =
+            read_registered_source(script_path.as_ref(), approved_root, config.max_source_bytes)?;
+        let source_bytes =
+            u64::try_from(source.len()).map_err(|_| LuaRegistrationError::SourceTooLarge)?;
+        let source_digest: [u8; 32] = Sha256::digest(source.as_bytes()).into();
         Ok(Self {
-            id: Uuid::new_v4(),
-            name: name.into(),
-            version: "1.0.0".to_string(),
-            description: String::new(),
-            author: "Unknown".to_string(),
-            script_path: canonical_script,
-            categories: vec![],
+            name,
+            version: "1.0.0".to_owned(),
+            categories: Vec::new(),
             enabled: true,
-            timeout_ms: 5000,
-            status: LuaScriptStatus::Loaded,
+            source: Arc::from(source),
+            source_bytes,
+            source_digest,
         })
     }
 
-    /// Create new script without validation (for testing only)
-    #[cfg(test)]
-    pub fn new_unsafe(name: impl Into<String>, script_path: impl Into<PathBuf>) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            name: name.into(),
-            version: "1.0.0".to_string(),
-            description: String::new(),
-            author: "Unknown".to_string(),
-            script_path: script_path.into(),
-            categories: vec![],
-            enabled: true,
-            timeout_ms: 5000,
-            status: LuaScriptStatus::Loaded,
+    pub fn with_version(
+        mut self,
+        version: impl Into<String>,
+    ) -> Result<Self, LuaRegistrationError> {
+        let version = version.into();
+        validate_identifier(&version, MAX_SCRIPT_VERSION_BYTES)
+            .map_err(|()| LuaRegistrationError::InvalidVersion)?;
+        self.version = version;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_categories(mut self, mut categories: Vec<ScriptCategory>) -> Self {
+        categories.sort_unstable();
+        categories.dedup();
+        self.categories = categories;
+        self
+    }
+
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn id(&self) -> String {
+        stable_script_id(&self.name, &self.version, &self.source_digest)
+    }
+
+    #[must_use]
+    pub fn manifest(&self) -> LuaScriptManifest {
+        self.manifest_with_enabled(self.enabled)
+    }
+
+    fn manifest_with_enabled(&self, enabled: bool) -> LuaScriptManifest {
+        LuaScriptManifest {
+            id: self.id(),
+            name: self.name.clone(),
+            version: self.version.clone(),
+            categories: self.categories.clone(),
+            enabled,
+            source_bytes: self.source_bytes,
+            source_sha256: hex_digest(&self.source_digest),
         }
-    }
-
-    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
-        self.description = desc.into();
-        self
-    }
-
-    pub fn with_author(mut self, author: impl Into<String>) -> Self {
-        self.author = author.into();
-        self
-    }
-
-    pub fn with_categories(mut self, cats: Vec<ScriptCategory>) -> Self {
-        self.categories = cats;
-        self
-    }
-
-    pub fn with_timeout(mut self, ms: u64) -> Self {
-        self.timeout_ms = ms;
-        self
-    }
-
-    /// Execute script with timeout enforcement (P0 feature)
-    pub async fn execute(&self, context: LuaContext) -> LuaExecutionResult {
-        let start = Instant::now();
-        let script_id = self.id.to_string();
-        let timestamp_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        // Enforce timeout using tokio::time::timeout
-        let result = timeout(
-            Duration::from_millis(self.timeout_ms),
-            Self::execute_script_async(&self.name, context.clone()),
-        )
-        .await;
-
-        let execution_time_ms = start.elapsed().as_millis() as u64;
-
-        match result {
-            Ok(Ok((output, return_value))) => {
-                // Execution succeeded within timeout
-                LuaExecutionResult {
-                    script_id,
-                    success: true,
-                    output,
-                    error: None,
-                    execution_time_ms,
-                    return_value: Some(return_value),
-                    timestamp_ms,
-                }
-            },
-            Ok(Err(err)) => {
-                // Execution failed (script error)
-                LuaExecutionResult {
-                    script_id,
-                    success: false,
-                    output: String::new(),
-                    error: Some(err),
-                    execution_time_ms,
-                    return_value: None,
-                    timestamp_ms,
-                }
-            },
-            Err(_elapsed) => {
-                // Timeout exceeded (P0 protection)
-                LuaExecutionResult {
-                    script_id,
-                    success: false,
-                    output: format!("Timeout after {}ms", self.timeout_ms),
-                    error: Some(format!(
-                        "Script execution timeout ({}ms exceeded)",
-                        self.timeout_ms
-                    )),
-                    execution_time_ms,
-                    return_value: None,
-                    timestamp_ms,
-                }
-            },
-        }
-    }
-
-    /// Execute Lua script in sandboxed VM with security restrictions
-    async fn execute_script_async(
-        script_name: &str,
-        context: LuaContext,
-    ) -> Result<(String, String), String> {
-        let script_name = script_name.to_string();
-        // Run Lua execution in blocking thread to avoid blocking async runtime
-        tokio::task::spawn_blocking(move || Self::execute_lua_sandboxed(&script_name, &context))
-            .await
-            .map_err(|e| format!("Task join error: {}", e))?
-    }
-
-    /// Execute Lua script with sandbox restrictions (P1 security)
-    fn execute_lua_sandboxed(
-        script_name: &str,
-        context: &LuaContext,
-    ) -> Result<(String, String), String> {
-        // Create fresh Lua VM for this execution
-        let lua = Lua::new();
-
-        // Set up sandbox: block dangerous libraries
-        Self::setup_sandbox(&lua)?;
-
-        // Set up safe globals: target, payload, parameters
-        Self::setup_globals(&lua, context)?;
-
-        // Simple example: use provided script name as code
-        // In production: read from file and execute
-        let script_code = format!(
-            r#"
-return {{
-    output = "Executed {} against {}",
-    result = "success"
-}}
-"#,
-            script_name, context.target
-        );
-
-        // Execute Lua code
-        let result: mlua::Table = lua
-            .load(&script_code)
-            .eval()
-            .map_err(|e| format!("Lua eval error: {}", e))?;
-
-        // Extract output and return value
-        let output = result
-            .get::<_, String>("output")
-            .unwrap_or_else(|_| format!("Executed {}", script_name));
-        let return_value = result
-            .get::<_, String>("result")
-            .unwrap_or_else(|_| "success".to_string());
-
-        Ok((output, return_value))
-    }
-
-    /// Set up sandbox restrictions (P1 security feature)
-    ///
-    /// Blocks all dangerous operations:
-    /// - os.execute, os.system (command execution)
-    /// - io.open, io.read, io.write (file access)
-    /// - package.loadlib, require (code loading)
-    /// - debug.* (VM inspection/manipulation)
-    /// - Unlimited memory and CPU
-    fn setup_sandbox(lua: &Lua) -> Result<(), String> {
-        let globals = lua.globals();
-
-        // ═════════════════════════════════════════════════════════════════
-        // BLOCK DANGEROUS OPERATIONS (P1 Security)
-        // ═════════════════════════════════════════════════════════════════
-
-        // 1️⃣ Block OS module - prevents os.execute("rm -rf /")
-        //    ✗ os.execute()
-        //    ✗ os.system()
-        //    ✗ os.getenv()
-        globals
-            .set("os", mlua::Nil)
-            .map_err(|e| format!("Failed to block os module: {}", e))?;
-
-        // 2️⃣ Block IO module - prevents io.open("/etc/passwd")
-        //    ✗ io.open()
-        //    ✗ io.read()
-        //    ✗ io.write()
-        //    ✗ io.input()
-        //    ✗ io.output()
-        globals
-            .set("io", mlua::Nil)
-            .map_err(|e| format!("Failed to block io module: {}", e))?;
-
-        // 3️⃣ Block Debug module - prevents introspection/manipulation
-        //    ✗ debug.getinfo()
-        //    ✗ debug.getlocal()
-        //    ✗ debug.setlocal()
-        //    ✗ debug.sethook()
-        globals
-            .set("debug", mlua::Nil)
-            .map_err(|e| format!("Failed to block debug module: {}", e))?;
-
-        // 4️⃣ Block Package module - prevents code loading
-        //    ✗ package.loadlib() - load C libraries
-        //    ✗ package.loadstring() - load arbitrary code
-        //    ✗ require() - load modules
-        globals
-            .set("package", mlua::Nil)
-            .map_err(|e| format!("Failed to block package module: {}", e))?;
-
-        // 5️⃣ Block dofile() - prevents executing external files
-        //    ✗ dofile("malicious.lua")
-        globals
-            .set("dofile", mlua::Nil)
-            .map_err(|e| format!("Failed to block dofile: {}", e))?;
-
-        // 6️⃣ Block loadfile() - prevents loading external files
-        //    ✗ loadfile("malicious.lua")
-        globals
-            .set("loadfile", mlua::Nil)
-            .map_err(|e| format!("Failed to block loadfile: {}", e))?;
-
-        // 7️⃣ Block require() - prevents module loading
-        //    ✗ require("socket")
-        //    ✗ require("os")
-        globals
-            .set("require", mlua::Nil)
-            .map_err(|e| format!("Failed to block require: {}", e))?;
-
-        // 8️⃣ Block load() - prevents dynamic code execution
-        //    ✗ load("malicious code")
-        globals
-            .set("load", mlua::Nil)
-            .map_err(|e| format!("Failed to block load: {}", e))?;
-
-        // 9️⃣ Block loadstring() alias
-        globals
-            .set("loadstring", mlua::Nil)
-            .map_err(|e| format!("Failed to block loadstring: {}", e))?;
-
-        // 🔟 Note: socket module blocked if LuaSocket available
-        // globals.set("socket", mlua::Nil)?;
-
-        // ═════════════════════════════════════════════════════════════════
-        // RESOURCE LIMITS (P1 Resource Protection)
-        // ═════════════════════════════════════════════════════════════════
-
-        // Set memory limit: 50MB max (prevents unbounded memory growth)
-        // mlua will raise error if scripts try to allocate more
-        lua.set_memory_limit(50_000_000) // 50 MB
-            .map_err(|e| format!("Failed to set memory limit: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Set up safe globals for script execution
-    fn setup_globals(lua: &Lua, context: &LuaContext) -> Result<(), String> {
-        let globals = lua.globals();
-
-        // Safe read-only globals: target, payload, parameters
-
-        globals
-            .set("target", context.target.clone())
-            .map_err(|e| format!("Failed to set target: {}", e))?;
-
-        globals
-            .set("payload", context.payload.clone())
-            .map_err(|e| format!("Failed to set payload: {}", e))?;
-
-        // Create parameters table from HashMap
-        let params_table = lua
-            .create_table()
-            .map_err(|e| format!("Failed to create params table: {}", e))?;
-
-        for (key, value) in &context.parameters {
-            params_table
-                .set(key.clone(), value.clone())
-                .map_err(|e| format!("Failed to set parameter {}: {}", key, e))?;
-        }
-
-        globals
-            .set("parameters", params_table)
-            .map_err(|e| format!("Failed to set parameters: {}", e))?;
-
-        // Allowed safe functions: string, table, math, utf8
-        // These are already available by default in Lua
-
-        Ok(())
     }
 }
 
-/// Lua script execution context
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Immutable host input exposed to Lua through read-only accessors.
+#[derive(Clone)]
 pub struct LuaContext {
-    pub target: String,
-    pub payload: String,
-    pub parameters: HashMap<String, String>,
-    pub timeout_ms: u64,
+    target: String,
+    payload: String,
+    parameters: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for LuaContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LuaContext")
+            .field("target_bytes", &self.target.len())
+            .field("payload_bytes", &self.payload.len())
+            .field("parameter_count", &self.parameters.len())
+            .finish()
+    }
 }
 
 impl LuaContext {
+    #[must_use]
     pub fn new(target: impl Into<String>) -> Self {
         Self {
             target: target.into(),
             payload: String::new(),
-            parameters: HashMap::new(),
-            timeout_ms: 5000,
+            parameters: BTreeMap::new(),
         }
     }
 
+    #[must_use]
     pub fn with_payload(mut self, payload: impl Into<String>) -> Self {
         self.payload = payload.into();
         self
     }
 
+    #[must_use]
     pub fn with_parameter(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.parameters.insert(key.into(), value.into());
         self
     }
+
+    fn validate(&self, config: &LuaEngineConfig) -> Result<(), LuaExecutionError> {
+        if self.target.len() > config.max_target_bytes {
+            return Err(LuaExecutionError::ContextTargetLimit);
+        }
+        if self.payload.len() > config.max_payload_bytes {
+            return Err(LuaExecutionError::ContextPayloadLimit);
+        }
+        if self.parameters.len() > config.max_parameters {
+            return Err(LuaExecutionError::ContextParameterCountLimit);
+        }
+        let mut total = self
+            .target
+            .len()
+            .checked_add(self.payload.len())
+            .ok_or(LuaExecutionError::ContextTotalLimit)?;
+        for (key, value) in &self.parameters {
+            if key.len() > config.max_parameter_key_bytes {
+                return Err(LuaExecutionError::ContextParameterKeyLimit);
+            }
+            if value.len() > config.max_parameter_value_bytes {
+                return Err(LuaExecutionError::ContextParameterValueLimit);
+            }
+            total = total
+                .checked_add(key.len())
+                .and_then(|bytes| bytes.checked_add(value.len()))
+                .ok_or(LuaExecutionError::ContextTotalLimit)?;
+            if total > config.max_context_bytes {
+                return Err(LuaExecutionError::ContextTotalLimit);
+            }
+        }
+        if total > config.max_context_bytes {
+            return Err(LuaExecutionError::ContextTotalLimit);
+        }
+        Ok(())
+    }
 }
 
-/// Lua script execution result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LuaExecutionResult {
-    pub script_id: String,
-    pub success: bool,
-    pub output: String,
-    pub error: Option<String>,
-    pub execution_time_ms: u64,
-    pub return_value: Option<String>,
-    pub timestamp_ms: u64, // P0: Timestamp for exponential decay
+/// Cloneable host cancellation signal checked from the VM instruction hook.
+#[derive(Clone, Default)]
+pub struct LuaCancellationToken {
+    cancelled: Arc<AtomicBool>,
 }
 
-/// Bounded execution history with exponential decay (P0 - not FIFO)
+impl fmt::Debug for LuaCancellationToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LuaCancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+impl LuaCancellationToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LuaExecutionStatus {
+    Completed,
+    Rejected,
+    Failed,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LuaExecutionError {
+    ScriptDisabled,
+    ConcurrencyLimit,
+    ContextTargetLimit,
+    ContextPayloadLimit,
+    ContextParameterCountLimit,
+    ContextParameterKeyLimit,
+    ContextParameterValueLimit,
+    ContextTotalLimit,
+    Syntax,
+    Runtime,
+    MemoryLimit,
+    InstructionLimit,
+    DeadlineExceeded,
+    Cancelled,
+    OutputLimit,
+    OutputNotUtf8,
+    UnsupportedOutputType,
+    NonFiniteOutputNumber,
+    ReturnLimit,
+    ReturnNotUtf8,
+    NonFiniteReturnNumber,
+    UnsupportedReturnType,
+    MultipleReturnValues,
+    HostFailure,
+}
+
+impl LuaExecutionError {
+    #[must_use]
+    pub fn status(self) -> LuaExecutionStatus {
+        match self {
+            Self::ScriptDisabled
+            | Self::ConcurrencyLimit
+            | Self::ContextTargetLimit
+            | Self::ContextPayloadLimit
+            | Self::ContextParameterCountLimit
+            | Self::ContextParameterKeyLimit
+            | Self::ContextParameterValueLimit
+            | Self::ContextTotalLimit => LuaExecutionStatus::Rejected,
+            Self::InstructionLimit | Self::DeadlineExceeded => LuaExecutionStatus::TimedOut,
+            Self::Cancelled => LuaExecutionStatus::Cancelled,
+            _ => LuaExecutionStatus::Failed,
+        }
+    }
+}
+
+impl fmt::Display for LuaExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ScriptDisabled => "script is disabled",
+            Self::ConcurrencyLimit => "concurrent execution limit reached",
+            Self::ContextTargetLimit => "context target limit exceeded",
+            Self::ContextPayloadLimit => "context payload limit exceeded",
+            Self::ContextParameterCountLimit => "context parameter count limit exceeded",
+            Self::ContextParameterKeyLimit => "context parameter key limit exceeded",
+            Self::ContextParameterValueLimit => "context parameter value limit exceeded",
+            Self::ContextTotalLimit => "context total limit exceeded",
+            Self::Syntax => "script syntax error",
+            Self::Runtime => "script runtime error",
+            Self::MemoryLimit => "Lua VM memory limit exceeded",
+            Self::InstructionLimit => "Lua VM instruction limit exceeded",
+            Self::DeadlineExceeded => "Lua execution deadline exceeded",
+            Self::Cancelled => "Lua execution cancelled",
+            Self::OutputLimit => "Lua output limit exceeded",
+            Self::OutputNotUtf8 => "Lua output must be UTF-8",
+            Self::UnsupportedOutputType => "Lua emitted an unsupported value type",
+            Self::NonFiniteOutputNumber => "Lua emitted a non-finite number",
+            Self::ReturnLimit => "Lua return value limit exceeded",
+            Self::ReturnNotUtf8 => "Lua return string must be UTF-8",
+            Self::NonFiniteReturnNumber => "Lua returned a non-finite number",
+            Self::UnsupportedReturnType => "Lua returned an unsupported value type",
+            Self::MultipleReturnValues => "Lua returned more than one value",
+            Self::HostFailure => "Lua host failure",
+        })
+    }
+}
+
+impl std::error::Error for LuaExecutionError {}
+
+/// Scalar value projected from a completed Lua invocation.
 ///
-/// Recent data weighted more heavily than old data.
-/// Formula: weight = alpha ^ ((current_time - entry_time) / half_life)
-/// Example: 9 min old response = 20% weight, current = 80% weight
-#[derive(Debug, Clone)]
-pub struct BoundedExecutionHistory {
-    entries: std::collections::VecDeque<LuaExecutionResult>,
-    max_size: usize,
-    decay_half_life_ms: u64, // Half-life for exponential decay (default 5min)
+/// The executor only constructs [`Self::Number`] for finite values. Constructing
+/// this public data enum directly does not grant script execution authority.
+#[derive(Clone, PartialEq)]
+pub enum LuaReturnValue {
+    Boolean(bool),
+    Integer(i64),
+    Number(f64),
+    String(String),
+}
+
+impl fmt::Debug for LuaReturnValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Boolean(_) => formatter.write_str("Boolean(<redacted>)"),
+            Self::Integer(_) => formatter.write_str("Integer(<redacted>)"),
+            Self::Number(_) => formatter.write_str("Number(<redacted>)"),
+            Self::String(value) => formatter
+                .debug_struct("String")
+                .field("bytes", &value.len())
+                .finish(),
+        }
+    }
+}
+
+impl LuaReturnValue {
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Boolean(_) => 1,
+            Self::Integer(_) | Self::Number(_) => 8,
+            Self::String(value) => value.len(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LuaExecutionResult {
+    script_id: String,
+    script_version: String,
+    source_sha256: String,
+    status: LuaExecutionStatus,
+    error: Option<LuaExecutionError>,
+    output: String,
+    return_value: Option<LuaReturnValue>,
+    execution_time_ms: u64,
+}
+
+impl fmt::Debug for LuaExecutionResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LuaExecutionResult")
+            .field("script_id", &self.script_id)
+            .field("script_version", &self.script_version)
+            .field("source_sha256", &self.source_sha256)
+            .field("status", &self.status)
+            .field("error", &self.error)
+            .field("output_bytes", &self.output.len())
+            .field(
+                "return_bytes",
+                &self
+                    .return_value
+                    .as_ref()
+                    .map(LuaReturnValue::retained_bytes),
+            )
+            .field("execution_time_ms", &self.execution_time_ms)
+            .finish()
+    }
+}
+
+impl LuaExecutionResult {
+    #[must_use]
+    pub fn script_id(&self) -> &str {
+        &self.script_id
+    }
+    #[must_use]
+    pub fn script_version(&self) -> &str {
+        &self.script_version
+    }
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+    #[must_use]
+    pub fn status(&self) -> LuaExecutionStatus {
+        self.status
+    }
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.status == LuaExecutionStatus::Completed
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<LuaExecutionError> {
+        self.error
+    }
+    #[must_use]
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+    #[must_use]
+    pub fn return_value(&self) -> Option<&LuaReturnValue> {
+        self.return_value.as_ref()
+    }
+    #[must_use]
+    pub fn execution_time_ms(&self) -> u64 {
+        self.execution_time_ms
+    }
+    fn completed(
+        provenance: ExecutionProvenance,
+        output: String,
+        return_value: Option<LuaReturnValue>,
+        started: Instant,
+    ) -> Self {
+        Self {
+            script_id: provenance.script_id,
+            script_version: provenance.script_version,
+            source_sha256: provenance.source_sha256,
+            status: LuaExecutionStatus::Completed,
+            error: None,
+            output,
+            return_value,
+            execution_time_ms: elapsed_ms(started),
+        }
+    }
+
+    fn failed(provenance: ExecutionProvenance, error: LuaExecutionError, started: Instant) -> Self {
+        Self {
+            script_id: provenance.script_id,
+            script_version: provenance.script_version,
+            source_sha256: provenance.source_sha256,
+            status: error.status(),
+            error: Some(error),
+            output: String::new(),
+            return_value: None,
+            execution_time_ms: elapsed_ms(started),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ExecutionProvenance {
+    script_id: String,
+    script_version: String,
+    source_sha256: String,
+}
+
+impl From<&LuaScript> for ExecutionProvenance {
+    fn from(script: &LuaScript) -> Self {
+        Self {
+            script_id: script.id(),
+            script_version: script.version.clone(),
+            source_sha256: hex_digest(&script.source_digest),
+        }
+    }
+}
+
+/// Bounded, privacy-minimized execution metadata retained by the registry.
+///
+/// Script identity, source provenance, status, error, and timing remain sensitive
+/// operational metadata. The receipt never contains Lua output, return values,
+/// context, source text, or filesystem paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuaExecutionReceipt {
+    script_id: String,
+    script_version: String,
+    source_sha256: String,
+    status: LuaExecutionStatus,
+    error: Option<LuaExecutionError>,
+    execution_time_ms: u64,
+}
+
+impl LuaExecutionReceipt {
+    #[must_use]
+    pub fn script_id(&self) -> &str {
+        &self.script_id
+    }
+
+    #[must_use]
+    pub fn script_version(&self) -> &str {
+        &self.script_version
+    }
+
+    #[must_use]
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    #[must_use]
+    pub fn status(&self) -> LuaExecutionStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<LuaExecutionError> {
+        self.error
+    }
+
+    #[must_use]
+    pub fn execution_time_ms(&self) -> u64 {
+        self.execution_time_ms
+    }
+
+    fn from_result(result: &LuaExecutionResult) -> Self {
+        Self {
+            script_id: result.script_id.clone(),
+            script_version: result.script_version.clone(),
+            source_sha256: result.source_sha256.clone(),
+            status: result.status,
+            error: result.error,
+            execution_time_ms: result.execution_time_ms,
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        256usize
+            .saturating_add(self.script_id.capacity())
+            .saturating_add(self.script_version.capacity())
+            .saturating_add(self.source_sha256.capacity())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LuaRegistryError {
+    InvalidConfig(LuaConfigError),
+    DuplicateId,
+    DuplicateName,
+    ScriptCapacity,
+    SourceLimit,
+    TotalSourceCapacity,
+    ScriptNotFound,
+    ScriptInUse,
+    InvocationLimit,
+    RegistrationGenerationExhausted,
+    HistorySequenceExhausted,
+    StateUnavailable,
+}
+
+impl fmt::Display for LuaRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidConfig(_) => "invalid Lua registry configuration",
+            Self::DuplicateId => "Lua script ID is already registered",
+            Self::DuplicateName => "Lua script name is already registered",
+            Self::ScriptCapacity => "Lua script registry capacity reached",
+            Self::SourceLimit => "Lua script exceeds this registry source limit",
+            Self::TotalSourceCapacity => "Lua registry source-byte capacity reached",
+            Self::ScriptNotFound => "Lua script not found",
+            Self::ScriptInUse => "Lua script has an active invocation",
+            Self::InvocationLimit => "Lua script invocation counter exhausted",
+            Self::RegistrationGenerationExhausted => "Lua registry generation sequence exhausted",
+            Self::HistorySequenceExhausted => "Lua history sequence exhausted",
+            Self::StateUnavailable => "Lua registry state unavailable",
+        })
+    }
+}
+
+impl std::error::Error for LuaRegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidConfig(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+struct HistoryEntry {
+    sequence: u64,
+    retained_bytes: usize,
+    receipt: LuaExecutionReceipt,
+}
+
+struct BoundedExecutionHistory {
+    entries: VecDeque<HistoryEntry>,
+    retained_bytes: usize,
 }
 
 impl BoundedExecutionHistory {
-    /// Create new bounded history with max size
-    pub fn new(max_size: usize) -> Self {
+    fn new() -> Self {
         Self {
-            entries: std::collections::VecDeque::with_capacity(max_size),
-            max_size,
-            decay_half_life_ms: 5 * 60 * 1000, // 5 minutes half-life
+            entries: VecDeque::new(),
+            retained_bytes: 0,
         }
     }
 
-    /// Create with custom decay half-life (in milliseconds)
-    pub fn with_decay(max_size: usize, half_life_ms: u64) -> Self {
-        Self {
-            entries: std::collections::VecDeque::with_capacity(max_size),
-            max_size,
-            decay_half_life_ms: half_life_ms,
+    fn pop_front(&mut self) -> Option<HistoryEntry> {
+        let entry = self.entries.pop_front()?;
+        self.retained_bytes = self.retained_bytes.saturating_sub(entry.retained_bytes);
+        Some(entry)
+    }
+
+    fn push(
+        &mut self,
+        sequence: u64,
+        receipt: LuaExecutionReceipt,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> bool {
+        let retained_bytes = receipt.retained_bytes();
+        if retained_bytes > max_bytes {
+            return false;
         }
-    }
-
-    /// Add execution result (removes oldest if at capacity)
-    pub fn push(&mut self, result: LuaExecutionResult) {
-        if self.entries.len() >= self.max_size {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(result);
-    }
-
-    /// Get all entries (oldest first)
-    pub fn all(&self) -> Vec<LuaExecutionResult> {
-        self.entries.iter().cloned().collect()
-    }
-
-    /// Get recent N entries (newest first)
-    pub fn recent(&self, n: usize) -> Vec<LuaExecutionResult> {
-        self.entries.iter().rev().take(n).cloned().collect()
-    }
-
-    /// Calculate exponential decay weight for an entry (P0 - ML ready)
-    ///
-    /// Formula: weight = 0.5 ^ (age_ms / half_life_ms)
-    ///
-    /// Examples (half_life = 5 min):
-    /// - Age 0 min:     weight = 1.0 (current)
-    /// - Age 2.5 min:   weight = 0.707 (70%)
-    /// - Age 5 min:     weight = 0.5 (50%)
-    /// - Age 10 min:    weight = 0.25 (25%)
-    /// - Age 15 min:    weight = 0.125 (12.5%)
-    pub fn decay_weight(&self, entry: &LuaExecutionResult, current_time_ms: u64) -> f32 {
-        let age_ms = current_time_ms.saturating_sub(entry.timestamp_ms);
-        if age_ms == 0 {
-            return 1.0;
-        }
-
-        let age_ratio = age_ms as f32 / self.decay_half_life_ms as f32;
-        0.5_f32.powf(age_ratio)
-    }
-
-    /// Get success rate with exponential decay (not simple average)
-    ///
-    /// Returns: weighted success count / weighted total count
-    pub fn success_rate_decayed(&self, current_time_ms: u64) -> f32 {
-        if self.entries.is_empty() {
-            return 0.0;
-        }
-
-        let mut weighted_success = 0.0;
-        let mut weighted_total = 0.0;
-
-        for entry in &self.entries {
-            let weight = self.decay_weight(entry, current_time_ms);
-            weighted_total += weight;
-            if entry.success {
-                weighted_success += weight;
+        while self.entries.len() >= max_entries
+            || self.retained_bytes.saturating_add(retained_bytes) > max_bytes
+        {
+            if self.pop_front().is_none() {
+                return false;
             }
         }
-
-        if weighted_total == 0.0 {
-            return 0.0;
-        }
-
-        weighted_success / weighted_total
-    }
-
-    /// Get average execution time with exponential decay
-    pub fn avg_time_decayed(&self, current_time_ms: u64) -> f32 {
-        if self.entries.is_empty() {
-            return 0.0;
-        }
-
-        let mut weighted_time = 0.0;
-        let mut weighted_total = 0.0;
-
-        for entry in &self.entries {
-            let weight = self.decay_weight(entry, current_time_ms);
-            weighted_total += weight;
-            weighted_time += (entry.execution_time_ms as f32) * weight;
-        }
-
-        if weighted_total == 0.0 {
-            return 0.0;
-        }
-
-        weighted_time / weighted_total
-    }
-
-    /// Get size
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Returns whether the history contains no executions.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.entries.push_back(HistoryEntry {
+            sequence,
+            retained_bytes,
+            receipt,
+        });
+        true
     }
 }
 
-/// Lua Script Registry
+struct RegisteredScript {
+    script: LuaScript,
+    enabled: bool,
+    active_invocations: usize,
+    generation: u64,
+}
+
+struct RegistryState {
+    scripts: BTreeMap<String, RegisteredScript>,
+    names: BTreeMap<String, String>,
+    histories: BTreeMap<String, BoundedExecutionHistory>,
+    history_bytes: usize,
+    next_sequence: u64,
+    next_generation: u64,
+    total_source_bytes: usize,
+}
+
+impl RegistryState {
+    fn new() -> Self {
+        Self {
+            scripts: BTreeMap::new(),
+            names: BTreeMap::new(),
+            histories: BTreeMap::new(),
+            history_bytes: 0,
+            next_sequence: 0,
+            next_generation: 0,
+            total_source_bytes: 0,
+        }
+    }
+
+    fn allocate_sequence(&mut self) -> Result<u64, LuaRegistryError> {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(LuaRegistryError::HistorySequenceExhausted)?;
+        Ok(sequence)
+    }
+
+    fn allocate_generation(&mut self) -> Result<u64, LuaRegistryError> {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(LuaRegistryError::RegistrationGenerationExhausted)?;
+        Ok(generation)
+    }
+
+    fn evict_global_oldest(&mut self) -> bool {
+        let oldest = self
+            .histories
+            .iter()
+            .filter_map(|(script_id, history)| {
+                history
+                    .entries
+                    .front()
+                    .map(|entry| (entry.sequence, script_id.clone()))
+            })
+            .min();
+        let Some((_, script_id)) = oldest else {
+            return false;
+        };
+        let Some(history) = self.histories.get_mut(&script_id) else {
+            return false;
+        };
+        if let Some(entry) = history.pop_front() {
+            self.history_bytes = self.history_bytes.saturating_sub(entry.retained_bytes);
+        }
+        if history.entries.is_empty() {
+            self.histories.remove(&script_id);
+        }
+        true
+    }
+}
+
+struct InvocationLease {
+    state: Arc<Mutex<RegistryState>>,
+    script_id: String,
+    generation: u64,
+}
+
+impl Drop for InvocationLease {
+    fn drop(&mut self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(entry) = state.scripts.get_mut(&self.script_id) else {
+            return;
+        };
+        if entry.generation == self.generation {
+            entry.active_invocations = entry.active_invocations.saturating_sub(1);
+        }
+    }
+}
+
+struct RegisteredSnapshot {
+    script: LuaScript,
+    enabled: bool,
+    generation: u64,
+}
+
 pub struct LuaScriptRegistry {
-    scripts: Arc<dashmap::DashMap<String, LuaScript>>,
-    execution_history: Arc<dashmap::DashMap<String, BoundedExecutionHistory>>,
-    enabled_count: Arc<std::sync::atomic::AtomicU32>,
-    max_history_size: usize,
+    state: Arc<Mutex<RegistryState>>,
+    config: LuaEngineConfig,
+    execution_permits: Arc<Semaphore>,
+}
+
+impl fmt::Debug for LuaScriptRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LuaScriptRegistry")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LuaScriptRegistry {
-    /// Creates new Lua script registry from config (P0 - production ready)
-    pub fn from_config(config: &LuaEngineConfig) -> Self {
-        Self {
-            scripts: Arc::new(dashmap::DashMap::new()),
-            execution_history: Arc::new(dashmap::DashMap::new()),
-            enabled_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_history_size: config.history_size, // From config
-        }
-    }
-
-    /// Creates new Lua script registry with bounded execution history (100 entries per script)
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, LuaRegistryError> {
         Self::from_config(&LuaEngineConfig::default())
     }
 
-    /// Creates new registry with custom history size limit
-    pub fn with_history_size(max_history_size: usize) -> Self {
-        Self {
-            scripts: Arc::new(dashmap::DashMap::new()),
-            execution_history: Arc::new(dashmap::DashMap::new()),
-            enabled_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            max_history_size,
+    pub fn from_config(config: &LuaEngineConfig) -> Result<Self, LuaRegistryError> {
+        config.validate().map_err(LuaRegistryError::InvalidConfig)?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(RegistryState::new())),
+            config: config.clone(),
+            execution_permits: Arc::new(Semaphore::new(config.max_concurrent_executions)),
+        })
+    }
+
+    pub fn register(&self, script: LuaScript) -> Result<(), LuaRegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        let id = script.id();
+        if state.scripts.contains_key(&id) {
+            return Err(LuaRegistryError::DuplicateId);
         }
-    }
-
-    /// Registers a Lua script
-    pub fn register(&self, script: LuaScript) {
-        if script.enabled {
-            self.enabled_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if state.names.contains_key(&script.name) {
+            return Err(LuaRegistryError::DuplicateName);
         }
-        self.scripts.insert(script.id.to_string(), script);
+        if state.scripts.len() >= self.config.max_scripts {
+            return Err(LuaRegistryError::ScriptCapacity);
+        }
+        if script.source.len() > self.config.max_source_bytes {
+            return Err(LuaRegistryError::SourceLimit);
+        }
+        let total_source_bytes = state
+            .total_source_bytes
+            .checked_add(script.source.len())
+            .ok_or(LuaRegistryError::TotalSourceCapacity)?;
+        if total_source_bytes > self.config.max_total_source_bytes {
+            return Err(LuaRegistryError::TotalSourceCapacity);
+        }
+        let generation = state.allocate_generation()?;
+        state.names.insert(script.name.clone(), id.clone());
+        state.scripts.insert(
+            id,
+            RegisteredScript {
+                enabled: script.enabled,
+                script,
+                active_invocations: 0,
+                generation,
+            },
+        );
+        state.total_source_bytes = total_source_bytes;
+        Ok(())
     }
 
-    /// Gets script by ID
-    pub fn get(&self, script_id: &str) -> Option<LuaScript> {
-        self.scripts.get(script_id).map(|s| s.clone())
+    pub fn get(&self, script_id: &str) -> Result<Option<LuaScriptManifest>, LuaRegistryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        Ok(state
+            .scripts
+            .get(script_id)
+            .map(|entry| entry.script.manifest_with_enabled(entry.enabled)))
     }
 
-    /// Lists all scripts
-    pub fn list_all(&self) -> Vec<LuaScript> {
-        self.scripts
-            .iter()
-            .map(|ref_multi| ref_multi.value().clone())
-            .collect()
+    pub fn list_all(&self) -> Result<Vec<LuaScriptManifest>, LuaRegistryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        let mut manifests: Vec<_> = state
+            .scripts
+            .values()
+            .map(|entry| entry.script.manifest_with_enabled(entry.enabled))
+            .collect();
+        manifests.sort_by(|left, right| {
+            (&left.name, &left.version, &left.id).cmp(&(&right.name, &right.version, &right.id))
+        });
+        Ok(manifests)
     }
 
-    /// Lists enabled scripts
-    pub fn list_enabled(&self) -> Vec<LuaScript> {
-        self.scripts
-            .iter()
-            .filter(|ref_multi| ref_multi.value().enabled)
-            .map(|ref_multi| ref_multi.value().clone())
-            .collect()
+    pub fn list_enabled(&self) -> Result<Vec<LuaScriptManifest>, LuaRegistryError> {
+        Ok(self
+            .list_all()?
+            .into_iter()
+            .filter(LuaScriptManifest::enabled)
+            .collect())
     }
 
-    /// Lists scripts by category
-    pub fn list_by_category(&self, category: &str) -> Vec<LuaScript> {
-        self.scripts
-            .iter()
-            .filter(|ref_multi| {
-                ref_multi
-                    .value()
-                    .categories
-                    .iter()
-                    .any(|script_category| script_category.as_str() == category)
+    pub fn list_by_category(
+        &self,
+        category: ScriptCategory,
+    ) -> Result<Vec<LuaScriptManifest>, LuaRegistryError> {
+        Ok(self
+            .list_all()?
+            .into_iter()
+            .filter(|manifest| manifest.categories.contains(&category))
+            .collect())
+    }
+
+    pub async fn execute(
+        &self,
+        script_id: &str,
+        context: LuaContext,
+    ) -> Result<LuaExecutionResult, LuaRegistryError> {
+        self.execute_with_cancellation(script_id, context, LuaCancellationToken::new())
+            .await
+    }
+
+    pub async fn execute_with_cancellation(
+        &self,
+        script_id: &str,
+        context: LuaContext,
+        cancellation: LuaCancellationToken,
+    ) -> Result<LuaExecutionResult, LuaRegistryError> {
+        let snapshot = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LuaRegistryError::StateUnavailable)?;
+            let entry = state
+                .scripts
+                .get(script_id)
+                .ok_or(LuaRegistryError::ScriptNotFound)?;
+            RegisteredSnapshot {
+                script: entry.script.clone(),
+                enabled: entry.enabled,
+                generation: entry.generation,
+            }
+        };
+        let started = Instant::now();
+        if !snapshot.enabled {
+            let result = LuaExecutionResult::failed(
+                ExecutionProvenance::from(&snapshot.script),
+                LuaExecutionError::ScriptDisabled,
+                started,
+            );
+            self.record_result(snapshot.generation, &result)?;
+            return Ok(result);
+        }
+        if let Err(error) = context.validate(&self.config) {
+            let result = LuaExecutionResult::failed(
+                ExecutionProvenance::from(&snapshot.script),
+                error,
+                started,
+            );
+            self.record_result(snapshot.generation, &result)?;
+            return Ok(result);
+        }
+        if cancellation.is_cancelled() {
+            let result = LuaExecutionResult::failed(
+                ExecutionProvenance::from(&snapshot.script),
+                LuaExecutionError::Cancelled,
+                started,
+            );
+            self.record_result(snapshot.generation, &result)?;
+            return Ok(result);
+        }
+        let runtime = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let result = LuaExecutionResult::failed(
+                    ExecutionProvenance::from(&snapshot.script),
+                    LuaExecutionError::HostFailure,
+                    started,
+                );
+                self.record_result(snapshot.generation, &result)?;
+                return Ok(result);
+            },
+        };
+        let permit = match Arc::clone(&self.execution_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let result = LuaExecutionResult::failed(
+                    ExecutionProvenance::from(&snapshot.script),
+                    LuaExecutionError::ConcurrencyLimit,
+                    started,
+                );
+                self.record_result(snapshot.generation, &result)?;
+                return Ok(result);
+            },
+        };
+        let (script, lease, generation) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LuaRegistryError::StateUnavailable)?;
+            let entry = state
+                .scripts
+                .get_mut(script_id)
+                .ok_or(LuaRegistryError::ScriptNotFound)?;
+            if !entry.enabled {
+                let provenance = ExecutionProvenance::from(&entry.script);
+                let generation = entry.generation;
+                drop(state);
+                drop(permit);
+                let result = LuaExecutionResult::failed(
+                    provenance,
+                    LuaExecutionError::ScriptDisabled,
+                    started,
+                );
+                self.record_result(generation, &result)?;
+                return Ok(result);
+            }
+            entry.active_invocations = entry
+                .active_invocations
+                .checked_add(1)
+                .ok_or(LuaRegistryError::InvocationLimit)?;
+            let script = entry.script.clone();
+            let generation = entry.generation;
+            let lease = InvocationLease {
+                state: Arc::clone(&self.state),
+                script_id: script.id(),
+                generation,
+            };
+            (script, lease, generation)
+        };
+        let config = self.config.clone();
+        let fallback_provenance = ExecutionProvenance::from(&script);
+        let worker = match catch_unwind(AssertUnwindSafe(|| {
+            runtime.spawn_blocking(move || {
+                let _permit = permit;
+                let result = execute_snapshot(script, context, config, cancellation, started);
+                (result, lease)
             })
-            .map(|ref_multi| ref_multi.value().clone())
-            .collect()
+        })) {
+            Ok(worker) => worker,
+            Err(_) => {
+                let result = LuaExecutionResult::failed(
+                    fallback_provenance,
+                    LuaExecutionError::HostFailure,
+                    started,
+                );
+                self.record_result(generation, &result)?;
+                return Ok(result);
+            },
+        };
+        let result = match await_worker(worker).await {
+            Ok((result, lease)) => {
+                self.record_result(generation, &result)?;
+                drop(lease);
+                result
+            },
+            Err(_) => {
+                let result = LuaExecutionResult::failed(
+                    fallback_provenance,
+                    LuaExecutionError::HostFailure,
+                    started,
+                );
+                self.record_result(generation, &result)?;
+                result
+            },
+        };
+        Ok(result)
     }
 
-    /// Records execution result (enforces bounded history size)
-    pub fn record_execution(&self, result: LuaExecutionResult) {
-        let script_id = result.script_id.clone();
-        if let Some(mut history) = self.execution_history.get_mut(&script_id) {
-            history.push(result);
-        } else {
-            let mut history = BoundedExecutionHistory::new(self.max_history_size);
-            history.push(result);
-            self.execution_history.insert(script_id, history);
-        }
-    }
-
-    /// Gets execution history for script (oldest first)
-    pub fn get_history(&self, script_id: &str) -> Vec<LuaExecutionResult> {
-        self.execution_history
+    pub fn get_history(
+        &self,
+        script_id: &str,
+    ) -> Result<Vec<LuaExecutionReceipt>, LuaRegistryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        Ok(state
+            .histories
             .get(script_id)
-            .map(|h| h.all())
-            .unwrap_or_default()
+            .map(|history| {
+                history
+                    .entries
+                    .iter()
+                    .map(|entry| entry.receipt.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
-    /// Gets recent N execution results for script (newest first)
-    pub fn get_recent_history(&self, script_id: &str, n: usize) -> Vec<LuaExecutionResult> {
-        self.execution_history
+    pub fn get_recent_history(
+        &self,
+        script_id: &str,
+        count: usize,
+    ) -> Result<Vec<LuaExecutionReceipt>, LuaRegistryError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        Ok(state
+            .histories
             .get(script_id)
-            .map(|h| h.recent(n))
-            .unwrap_or_default()
+            .map(|history| {
+                history
+                    .entries
+                    .iter()
+                    .rev()
+                    .take(count)
+                    .map(|entry| entry.receipt.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
-    /// Gets script count
-    pub fn count(&self) -> usize {
-        self.scripts.len()
+    pub fn count(&self) -> Result<usize, LuaRegistryError> {
+        self.state
+            .lock()
+            .map(|state| state.scripts.len())
+            .map_err(|_| LuaRegistryError::StateUnavailable)
     }
 
-    /// Gets enabled script count
-    pub fn enabled_count(&self) -> u32 {
-        self.enabled_count.load(std::sync::atomic::Ordering::SeqCst)
+    pub fn enabled_count(&self) -> Result<usize, LuaRegistryError> {
+        self.state
+            .lock()
+            .map(|state| state.scripts.values().filter(|entry| entry.enabled).count())
+            .map_err(|_| LuaRegistryError::StateUnavailable)
     }
 
-    /// Enables/disables script
-    pub fn set_enabled(&self, script_id: &str, enabled: bool) -> Result<(), String> {
-        if let Some(mut script) = self.scripts.get_mut(script_id) {
-            let was_enabled = script.enabled;
-            script.enabled = enabled;
+    pub fn set_enabled(&self, script_id: &str, enabled: bool) -> Result<(), LuaRegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        let entry = state
+            .scripts
+            .get_mut(script_id)
+            .ok_or(LuaRegistryError::ScriptNotFound)?;
+        entry.enabled = enabled;
+        Ok(())
+    }
 
-            if enabled && !was_enabled {
-                self.enabled_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            } else if !enabled && was_enabled {
-                self.enabled_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            Ok(())
-        } else {
-            Err(format!("Script {} not found", script_id))
+    pub fn unregister(&self, script_id: &str) -> Result<(), LuaRegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        let entry = state
+            .scripts
+            .get(script_id)
+            .ok_or(LuaRegistryError::ScriptNotFound)?;
+        if entry.active_invocations != 0 {
+            return Err(LuaRegistryError::ScriptInUse);
         }
+        let total_source_bytes = state
+            .total_source_bytes
+            .checked_sub(entry.script.source.len())
+            .ok_or(LuaRegistryError::StateUnavailable)?;
+        let removed_history_bytes = state
+            .histories
+            .get(script_id)
+            .map_or(0, |history| history.retained_bytes);
+        let history_bytes = state
+            .history_bytes
+            .checked_sub(removed_history_bytes)
+            .ok_or(LuaRegistryError::StateUnavailable)?;
+        let entry = state
+            .scripts
+            .remove(script_id)
+            .ok_or(LuaRegistryError::ScriptNotFound)?;
+        state.names.remove(&entry.script.name);
+        state.total_source_bytes = total_source_bytes;
+        state.histories.remove(script_id);
+        state.history_bytes = history_bytes;
+        Ok(())
     }
 
-    /// Unregisters script
-    pub fn unregister(&self, script_id: &str) -> Result<(), String> {
-        if let Some((_, script)) = self.scripts.remove(script_id) {
-            if script.enabled {
-                self.enabled_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            self.execution_history.remove(script_id);
-            Ok(())
-        } else {
-            Err(format!("Script {} not found", script_id))
+    fn record_result(
+        &self,
+        generation: u64,
+        result: &LuaExecutionResult,
+    ) -> Result<(), LuaRegistryError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LuaRegistryError::StateUnavailable)?;
+        if !state
+            .scripts
+            .get(result.script_id())
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            return Ok(());
         }
+        let receipt = LuaExecutionReceipt::from_result(result);
+        let receipt_bytes = receipt.retained_bytes();
+        if receipt_bytes > self.config.max_history_bytes_per_script
+            || receipt_bytes > self.config.max_history_bytes_total
+        {
+            return Ok(());
+        }
+        let sequence = state.allocate_sequence()?;
+        while state.history_bytes.saturating_add(receipt_bytes)
+            > self.config.max_history_bytes_total
+        {
+            if !state.evict_global_oldest() {
+                return Ok(());
+            }
+        }
+        let history = state
+            .histories
+            .entry(result.script_id().to_owned())
+            .or_insert_with(BoundedExecutionHistory::new);
+        let before = history.retained_bytes;
+        let inserted = history.push(
+            sequence,
+            receipt,
+            self.config.history_size,
+            self.config.max_history_bytes_per_script,
+        );
+        let after = history.retained_bytes;
+        if inserted {
+            state.history_bytes = state
+                .history_bytes
+                .saturating_sub(before)
+                .saturating_add(after);
+        }
+        Ok(())
     }
 }
 
-impl Default for LuaScriptRegistry {
-    fn default() -> Self {
-        Self::new()
+async fn await_worker<T>(mut worker: tokio::task::JoinHandle<T>) -> Result<T, ()> {
+    poll_fn(|context| {
+        match catch_unwind(AssertUnwindSafe(|| Pin::new(&mut worker).poll(context))) {
+            Ok(Poll::Ready(result)) => Poll::Ready(result.map_err(|_| ())),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(_) => {
+                worker.abort();
+                Poll::Ready(Err(()))
+            },
+        }
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StickyAbort {
+    Cancelled,
+    Deadline,
+    Instruction,
+    Output,
+    OutputEncoding,
+    UnsupportedOutput,
+    NonFiniteOutput,
+}
+
+fn enforce_hook_controls(
+    sticky_abort: &Cell<Option<StickyAbort>>,
+    instruction_count: &Cell<u64>,
+    cancelled: bool,
+    deadline_exceeded: bool,
+    hook_interval: u32,
+    instruction_limit: u64,
+) -> mlua::Result<()> {
+    if let Some(reason) = sticky_abort.get() {
+        return Err(sticky_abort_error(reason));
+    }
+    if cancelled {
+        sticky_abort.set(Some(StickyAbort::Cancelled));
+        return Err(sticky_abort_error(StickyAbort::Cancelled));
+    }
+    if deadline_exceeded {
+        sticky_abort.set(Some(StickyAbort::Deadline));
+        return Err(sticky_abort_error(StickyAbort::Deadline));
+    }
+    let (next, exhausted) =
+        instruction_quantum_status(instruction_count.get(), hook_interval, instruction_limit);
+    instruction_count.set(next);
+    if exhausted {
+        sticky_abort.set(Some(StickyAbort::Instruction));
+        return Err(sticky_abort_error(StickyAbort::Instruction));
+    }
+    Ok(())
+}
+
+fn execute_snapshot(
+    script: LuaScript,
+    context: LuaContext,
+    config: LuaEngineConfig,
+    cancellation: LuaCancellationToken,
+    started: Instant,
+) -> LuaExecutionResult {
+    let provenance = ExecutionProvenance::from(&script);
+    let deadline = started
+        .checked_add(Duration::from_millis(config.default_timeout_ms))
+        .unwrap_or(started);
+    if cancellation.is_cancelled() {
+        return LuaExecutionResult::failed(provenance, LuaExecutionError::Cancelled, started);
+    }
+    if Instant::now() >= deadline {
+        return LuaExecutionResult::failed(
+            provenance,
+            LuaExecutionError::DeadlineExceeded,
+            started,
+        );
+    }
+    let abort = Rc::new(Cell::new(None));
+    let output = Rc::new(RefCell::new(String::new()));
+    let lua = match Lua::new_with(StdLib::NONE, LuaOptions::default()) {
+        Ok(lua) => lua,
+        Err(_) => {
+            return LuaExecutionResult::failed(provenance, LuaExecutionError::HostFailure, started);
+        },
+    };
+    if lua.set_memory_limit(config.max_memory_bytes).is_err() {
+        return LuaExecutionResult::failed(provenance, LuaExecutionError::HostFailure, started);
+    }
+    let instruction_count = Rc::new(Cell::new(0u64));
+    let hook_abort = Rc::clone(&abort);
+    let hook_count = Rc::clone(&instruction_count);
+    let hook_cancellation = cancellation.clone();
+    let hook_interval = config.hook_interval;
+    let instruction_limit = config.instruction_limit;
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(hook_interval),
+        move |_, _| {
+            enforce_hook_controls(
+                &hook_abort,
+                &hook_count,
+                hook_cancellation.is_cancelled(),
+                Instant::now() >= deadline,
+                hook_interval,
+                instruction_limit,
+            )
+        },
+    );
+    let environment = match build_environment(
+        &lua,
+        &context,
+        Rc::clone(&output),
+        Rc::clone(&abort),
+        config.max_output_bytes,
+    ) {
+        Ok(environment) => environment,
+        Err(error) => {
+            let code = classify_mlua_error(&error, abort.get());
+            return LuaExecutionResult::failed(provenance, code, started);
+        },
+    };
+    if let Some(error) = terminal_control_error(
+        abort.get(),
+        cancellation.is_cancelled(),
+        Instant::now() >= deadline,
+    ) {
+        return LuaExecutionResult::failed(provenance, error, started);
+    }
+    let return_value = {
+        let execution = lua
+            .load(script.source.as_bytes())
+            .set_name(REGISTERED_CHUNK_NAME)
+            .set_mode(ChunkMode::Text)
+            .set_environment(environment)
+            .call::<_, MultiValue>(());
+        if let Some(error) = terminal_control_error(
+            abort.get(),
+            cancellation.is_cancelled(),
+            Instant::now() >= deadline,
+        ) {
+            return LuaExecutionResult::failed(provenance, error, started);
+        }
+        match execution {
+            Ok(values) => match project_return_values(values, config.max_return_bytes) {
+                Ok(value) => value,
+                Err(error) => return LuaExecutionResult::failed(provenance, error, started),
+            },
+            Err(error) => {
+                return LuaExecutionResult::failed(
+                    provenance,
+                    classify_mlua_error(&error, abort.get()),
+                    started,
+                );
+            },
+        }
+    };
+    drop(lua);
+    let output =
+        Rc::try_unwrap(output).map_or_else(|shared| shared.borrow().clone(), RefCell::into_inner);
+    if let Some(error) = terminal_control_error(
+        abort.get(),
+        cancellation.is_cancelled(),
+        Instant::now() >= deadline,
+    ) {
+        return LuaExecutionResult::failed(provenance, error, started);
+    }
+    LuaExecutionResult::completed(provenance, output, return_value, started)
+}
+
+fn build_environment<'lua>(
+    lua: &'lua Lua,
+    context: &LuaContext,
+    output: Rc<RefCell<String>>,
+    abort: Rc<Cell<Option<StickyAbort>>>,
+    max_output_bytes: usize,
+) -> mlua::Result<mlua::Table<'lua>> {
+    let allowed = lua.create_table()?;
+    let type_function = lua.create_function(|_, value: Value| Ok(value.type_name()))?;
+    allowed.raw_set("type", type_function)?;
+    let emit_output = output;
+    let emit_abort = abort;
+    let emit = lua.create_function(move |_, value: Value| {
+        let mut buffer = emit_output.borrow_mut();
+        let appended = match value {
+            Value::Boolean(true) => append_emitted(&mut buffer, "true", max_output_bytes),
+            Value::Boolean(false) => append_emitted(&mut buffer, "false", max_output_bytes),
+            Value::Integer(value) => {
+                append_emitted(&mut buffer, &value.to_string(), max_output_bytes)
+            },
+            Value::Number(value) if value.is_finite() => {
+                append_emitted(&mut buffer, &value.to_string(), max_output_bytes)
+            },
+            Value::Number(_) => {
+                emit_abort.set(Some(StickyAbort::NonFiniteOutput));
+                return Err(MluaError::RuntimeError(ABORT_OUTPUT_NUMBER.to_owned()));
+            },
+            Value::String(value) => match value.to_str() {
+                Ok(value) => append_emitted(&mut buffer, value, max_output_bytes),
+                Err(_) => {
+                    emit_abort.set(Some(StickyAbort::OutputEncoding));
+                    return Err(MluaError::RuntimeError(ABORT_OUTPUT_ENCODING.to_owned()));
+                },
+            },
+            _ => {
+                emit_abort.set(Some(StickyAbort::UnsupportedOutput));
+                return Err(MluaError::RuntimeError(ABORT_OUTPUT_TYPE.to_owned()));
+            },
+        };
+        if appended.is_err() {
+            emit_abort.set(Some(StickyAbort::Output));
+            return Err(MluaError::RuntimeError(ABORT_OUTPUT.to_owned()));
+        }
+        Ok(())
+    })?;
+    allowed.raw_set("emit", emit)?;
+    allowed.raw_set("context", build_context_proxy(lua, context)?)?;
+    readonly_proxy(lua, allowed)
+}
+
+fn append_emitted(buffer: &mut String, value: &str, max_output_bytes: usize) -> Result<(), ()> {
+    let next_len = buffer.len().checked_add(value.len()).ok_or(())?;
+    if next_len > max_output_bytes {
+        return Err(());
+    }
+    buffer.push_str(value);
+    Ok(())
+}
+
+fn build_context_proxy<'lua>(
+    lua: &'lua Lua,
+    context: &LuaContext,
+) -> mlua::Result<mlua::Table<'lua>> {
+    let values = lua.create_table()?;
+    values.raw_set("target", context.target.clone())?;
+    values.raw_set("payload", context.payload.clone())?;
+    values.raw_set("parameter_count", context.parameters.len())?;
+    let parameters = Arc::new(context.parameters.clone());
+    let lookup_parameters = Arc::clone(&parameters);
+    let parameter = lua.create_function(move |_, key: mlua::String| {
+        let Ok(key) = key.to_str() else {
+            return Ok(None::<String>);
+        };
+        Ok(lookup_parameters.get(key).cloned())
+    })?;
+    values.raw_set("parameter", parameter)?;
+    let ordered_parameters: Arc<Vec<(String, String)>> = Arc::new(
+        parameters
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    let parameter_at = lua.create_function(move |_, index: usize| {
+        let value = index
+            .checked_sub(1)
+            .and_then(|index| ordered_parameters.get(index));
+        Ok(match value {
+            Some((key, value)) => (Some(key.clone()), Some(value.clone())),
+            None => (None::<String>, None::<String>),
+        })
+    })?;
+    values.raw_set("parameter_at", parameter_at)?;
+    readonly_proxy(lua, values)
+}
+
+fn readonly_proxy<'lua>(
+    lua: &'lua Lua,
+    values: mlua::Table<'lua>,
+) -> mlua::Result<mlua::Table<'lua>> {
+    let proxy = lua.create_table()?;
+    let metatable = lua.create_table()?;
+    metatable.raw_set("__index", values)?;
+    metatable.raw_set(
+        "__newindex",
+        lua.create_function(|_, _: (Value, Value, Value)| -> mlua::Result<()> {
+            Err(MluaError::RuntimeError(IMMUTABLE_CONTEXT.to_owned()))
+        })?,
+    )?;
+    metatable.raw_set("__metatable", "locked")?;
+    proxy.set_metatable(Some(metatable));
+    Ok(proxy)
+}
+
+fn project_return_values(
+    mut values: MultiValue<'_>,
+    max_return_bytes: usize,
+) -> Result<Option<LuaReturnValue>, LuaExecutionError> {
+    // mlua must collect LUA_MULTRET to distinguish zero, one, and many values.
+    // The source, VM-memory, and concurrency caps jointly bound this temporary
+    // Rust-side container; there is no lower-level one-slot API that preserves
+    // the number of returned values.
+    if values.len() > 1 {
+        return Err(LuaExecutionError::MultipleReturnValues);
+    }
+    project_return_value(values.pop_front().unwrap_or(Value::Nil), max_return_bytes)
+}
+
+fn project_return_value(
+    value: Value<'_>,
+    max_return_bytes: usize,
+) -> Result<Option<LuaReturnValue>, LuaExecutionError> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::Boolean(value) => Ok(Some(LuaReturnValue::Boolean(value))),
+        Value::Integer(value) => Ok(Some(LuaReturnValue::Integer(value))),
+        Value::Number(value) if value.is_finite() => Ok(Some(LuaReturnValue::Number(value))),
+        Value::Number(_) => Err(LuaExecutionError::NonFiniteReturnNumber),
+        Value::String(value) => {
+            let value = value
+                .to_str()
+                .map_err(|_| LuaExecutionError::ReturnNotUtf8)?;
+            if value.len() > max_return_bytes {
+                return Err(LuaExecutionError::ReturnLimit);
+            }
+            Ok(Some(LuaReturnValue::String(value.to_owned())))
+        },
+        _ => Err(LuaExecutionError::UnsupportedReturnType),
     }
 }
 
-#[cfg(all(test, any()))]
+fn classify_mlua_error(error: &MluaError, sticky_abort: Option<StickyAbort>) -> LuaExecutionError {
+    if let Some(reason) = sticky_abort {
+        return sticky_abort_code(reason);
+    }
+    match error {
+        MluaError::SyntaxError { .. } => LuaExecutionError::Syntax,
+        MluaError::MemoryError(_) => LuaExecutionError::MemoryLimit,
+        MluaError::CallbackError { cause, .. } | MluaError::WithContext { cause, .. } => {
+            classify_mlua_error(cause, sticky_abort)
+        },
+        _ => LuaExecutionError::Runtime,
+    }
+}
+
+fn sticky_abort_error(reason: StickyAbort) -> MluaError {
+    MluaError::RuntimeError(
+        match reason {
+            StickyAbort::Cancelled => ABORT_CANCELLED,
+            StickyAbort::Deadline => ABORT_DEADLINE,
+            StickyAbort::Instruction => ABORT_INSTRUCTION,
+            StickyAbort::Output => ABORT_OUTPUT,
+            StickyAbort::OutputEncoding => ABORT_OUTPUT_ENCODING,
+            StickyAbort::UnsupportedOutput => ABORT_OUTPUT_TYPE,
+            StickyAbort::NonFiniteOutput => ABORT_OUTPUT_NUMBER,
+        }
+        .to_owned(),
+    )
+}
+
+fn sticky_abort_code(reason: StickyAbort) -> LuaExecutionError {
+    match reason {
+        StickyAbort::Cancelled => LuaExecutionError::Cancelled,
+        StickyAbort::Deadline => LuaExecutionError::DeadlineExceeded,
+        StickyAbort::Instruction => LuaExecutionError::InstructionLimit,
+        StickyAbort::Output => LuaExecutionError::OutputLimit,
+        StickyAbort::OutputEncoding => LuaExecutionError::OutputNotUtf8,
+        StickyAbort::UnsupportedOutput => LuaExecutionError::UnsupportedOutputType,
+        StickyAbort::NonFiniteOutput => LuaExecutionError::NonFiniteOutputNumber,
+    }
+}
+
+fn terminal_control_error(
+    sticky_abort: Option<StickyAbort>,
+    cancelled: bool,
+    deadline_exceeded: bool,
+) -> Option<LuaExecutionError> {
+    if let Some(reason) = sticky_abort {
+        Some(sticky_abort_code(reason))
+    } else if cancelled {
+        Some(LuaExecutionError::Cancelled)
+    } else if deadline_exceeded {
+        Some(LuaExecutionError::DeadlineExceeded)
+    } else {
+        None
+    }
+}
+
+fn instruction_quantum_status(current: u64, interval: u32, limit: u64) -> (u64, bool) {
+    let quantum = u64::from(interval);
+    let next = current.saturating_add(quantum);
+    let following_exceeds = match next.checked_add(quantum) {
+        Some(following) => following > limit,
+        None => true,
+    };
+    (next, next >= limit || following_exceeds)
+}
+
+fn read_registered_source(
+    script_path: &Path,
+    approved_root: &Path,
+    max_source_bytes: usize,
+) -> Result<String, LuaRegistrationError> {
+    let absolute_root =
+        std::path::absolute(approved_root).map_err(|_| LuaRegistrationError::InvalidPath)?;
+    let absolute_candidate = if script_path.is_absolute() {
+        std::path::absolute(script_path).map_err(|_| LuaRegistrationError::InvalidPath)?
+    } else {
+        absolute_root.join(script_path)
+    };
+    let relative = absolute_candidate
+        .strip_prefix(&absolute_root)
+        .map_err(|_| LuaRegistrationError::OutsideApprovedRoot)?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(LuaRegistrationError::InvalidPath);
+    }
+    if absolute_candidate
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("lua")
+    {
+        return Err(LuaRegistrationError::InvalidPath);
+    }
+    reject_symlink_components(&absolute_root, relative)?;
+    let canonical_root = absolute_root
+        .canonicalize()
+        .map_err(|_| LuaRegistrationError::InvalidPath)?;
+    let canonical_candidate = absolute_candidate
+        .canonicalize()
+        .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(LuaRegistrationError::OutsideApprovedRoot);
+    }
+    let path_metadata = canonical_candidate
+        .metadata()
+        .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    if !path_metadata.is_file() {
+        return Err(LuaRegistrationError::NotRegularFile);
+    }
+    if path_metadata.len() > max_source_bytes as u64 {
+        return Err(LuaRegistrationError::SourceTooLarge);
+    }
+    let mut file =
+        File::open(&canonical_candidate).map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    let before = file
+        .metadata()
+        .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    let read_limit = u64::try_from(max_source_bytes)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(LuaRegistrationError::SourceTooLarge)?;
+    let initial_capacity =
+        usize::try_from(path_metadata.len()).map_err(|_| LuaRegistrationError::SourceTooLarge)?;
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    file.by_ref()
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    if bytes.len() > max_source_bytes {
+        return Err(LuaRegistrationError::SourceTooLarge);
+    }
+    let after = file
+        .metadata()
+        .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+    let canonical_after = absolute_candidate
+        .canonicalize()
+        .map_err(|_| LuaRegistrationError::SourceChangedDuringRegistration)?;
+    reject_symlink_components(&absolute_root, relative)?;
+    let path_after = canonical_after
+        .metadata()
+        .map_err(|_| LuaRegistrationError::SourceChangedDuringRegistration)?;
+    if canonical_after != canonical_candidate
+        || !same_file_metadata(&before, &after)
+        || !same_file_metadata(&after, &path_after)
+        || after.len() != bytes.len() as u64
+    {
+        return Err(LuaRegistrationError::SourceChangedDuringRegistration);
+    }
+    String::from_utf8(bytes).map_err(|_| LuaRegistrationError::SourceNotUtf8)
+}
+
+fn reject_symlink_components(
+    absolute_root: &Path,
+    relative: &Path,
+) -> Result<(), LuaRegistrationError> {
+    let root_metadata = absolute_root
+        .symlink_metadata()
+        .map_err(|_| LuaRegistrationError::InvalidPath)?;
+    if root_metadata.file_type().is_symlink() {
+        return Err(LuaRegistrationError::SymlinkRejected);
+    }
+    let mut current = PathBuf::from(absolute_root);
+    for component in relative.components() {
+        if let Component::Normal(component) = component {
+            current.push(component);
+            let metadata = current
+                .symlink_metadata()
+                .map_err(|_| LuaRegistrationError::SourceReadFailed)?;
+            if metadata.file_type().is_symlink() {
+                return Err(LuaRegistrationError::SymlinkRejected);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_file_metadata(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(not(unix))]
+fn same_file_metadata(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+fn validate_identifier(value: &str, max_bytes: usize) -> Result<(), ()> {
+    if value.is_empty()
+        || value.len() > max_bytes
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn stable_script_id(name: &str, version: &str, source_digest: &[u8; 32]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"venom-lua-script/v1\0");
+    digest.update(name.as_bytes());
+    digest.update(b"\0");
+    digest.update(version.as_bytes());
+    digest.update(b"\0");
+    digest.update(source_digest);
+    let digest: [u8; 32] = digest.finalize().into();
+    let mut id = String::with_capacity(68);
+    id.push_str("lua:");
+    id.push_str(&hex_digest(&digest));
+    id
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_lua_script_creation() {
-        let script = LuaScript::new("test_1", "Test Script", "scripts/test.lua");
-        assert_eq!(script.id, "test_1");
-        assert_eq!(script.name, "Test Script");
-        assert!(script.enabled);
+    fn test_config() -> LuaEngineConfig {
+        let mut config = LuaEngineConfig::minimal();
+        config.default_timeout_ms = 250;
+        config.instruction_limit = 50_000;
+        config.hook_interval = 100;
+        config.max_memory_bytes = 2 * 1_024 * 1_024;
+        config.max_source_bytes = 8 * 1_024;
+        config.max_context_bytes = 8 * 1_024;
+        config.max_target_bytes = 2 * 1_024;
+        config.max_payload_bytes = 2 * 1_024;
+        config.max_parameter_key_bytes = 256;
+        config.max_parameter_value_bytes = 2 * 1_024;
+        config.max_output_bytes = 1_024;
+        config.max_return_bytes = 1_024;
+        config
+    }
+
+    fn fixture_with_config(source: &[u8], config: &LuaEngineConfig) -> (TempDir, LuaScript) {
+        let root = tempfile::tempdir().expect("temporary script root");
+        let path = root.path().join("fixture.lua");
+        fs::write(&path, source).expect("fixture source");
+        let script = LuaScript::new_safe_with_config("fixture", &path, root.path(), config)
+            .expect("registered fixture");
+        (root, script)
+    }
+
+    fn fixture(source: &str) -> (TempDir, LuaScript) {
+        fixture_with_config(source.as_bytes(), &test_config())
+    }
+
+    async fn run(source: &str, context: LuaContext) -> LuaExecutionResult {
+        let config = test_config();
+        let (_root, script) = fixture_with_config(source.as_bytes(), &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("registration");
+        registry.execute(&id, context).await.expect("execution")
     }
 
     #[test]
-    fn test_lua_script_with_metadata() {
-        let script = LuaScript::new("xss_1", "XSS Scanner", "scripts/xss.lua")
-            .with_description("Detects XSS vulnerabilities")
-            .with_author("VENOM Team")
-            .with_categories(vec!["xss".to_string(), "web".to_string()])
-            .with_timeout(3000);
+    fn script_category_text_contract_is_exhaustive() {
+        let cases = [
+            (ScriptCategory::Web, "web"),
+            (ScriptCategory::Dns, "dns"),
+            (ScriptCategory::Smb, "smb"),
+            (ScriptCategory::Ssh, "ssh"),
+            (ScriptCategory::Database, "database"),
+        ];
 
-        assert_eq!(script.description, "Detects XSS vulnerabilities");
-        assert_eq!(script.author, "VENOM Team");
-        assert_eq!(script.categories.len(), 2);
-        assert_eq!(script.timeout_ms, 3000);
-    }
-
-    #[test]
-    fn test_lua_context_creation() {
-        let ctx = LuaContext::new("http://target.com")
-            .with_payload("<script>alert('xss')</script>")
-            .with_parameter("timeout", "5000");
-
-        assert_eq!(ctx.target, "http://target.com");
-        assert_eq!(ctx.payload, "<script>alert('xss')</script>");
-        assert_eq!(ctx.parameters.get("timeout"), Some(&"5000".to_string()));
-    }
-
-    #[test]
-    fn test_lua_execution_result() {
-        let result = LuaExecutionResult {
-            script_id: "test_1".to_string(),
-            success: true,
-            output: "Vulnerability found".to_string(),
-            error: None,
-            execution_time_ms: 234,
-            return_value: Some("HIGH".to_string()),
-        };
-
-        assert!(result.success);
-        assert_eq!(result.return_value, Some("HIGH".to_string()));
-    }
-
-    #[test]
-    fn test_lua_script_status() {
-        assert_eq!(LuaScriptStatus::Loaded.as_str(), "loaded");
-        assert_eq!(LuaScriptStatus::Failed.as_str(), "failed");
-    }
-
-    #[test]
-    fn test_script_registry_creation() {
-        let registry = LuaScriptRegistry::new();
-        assert_eq!(registry.count(), 0);
-    }
-
-    #[test]
-    fn test_script_registration() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_1", "Test", "test.lua");
-
-        registry.register(script);
-        assert_eq!(registry.count(), 1);
-        assert_eq!(registry.enabled_count(), 1);
-    }
-
-    #[test]
-    fn test_script_retrieval() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_2", "Test 2", "test2.lua");
-
-        registry.register(script);
-        let retrieved = registry.get("test_2");
-
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().name, "Test 2");
-    }
-
-    #[test]
-    fn test_list_by_category() {
-        let registry = LuaScriptRegistry::new();
-
-        for i in 0..3 {
-            let script = LuaScript::new(format!("xss_{}", i), "XSS", "xss.lua")
-                .with_categories(vec!["xss".to_string()]);
-            registry.register(script);
-        }
-
-        let xss_scripts = registry.list_by_category("xss");
-        assert_eq!(xss_scripts.len(), 3);
-    }
-
-    #[test]
-    fn test_script_enable_disable() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_3", "Test 3", "test3.lua");
-
-        registry.register(script);
-        assert_eq!(registry.enabled_count(), 1);
-
-        registry.set_enabled("test_3", false).unwrap();
-        assert_eq!(registry.enabled_count(), 0);
-
-        registry.set_enabled("test_3", true).unwrap();
-        assert_eq!(registry.enabled_count(), 1);
-    }
-
-    #[test]
-    fn test_script_unregister() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_4", "Test 4", "test4.lua");
-
-        registry.register(script);
-        assert_eq!(registry.count(), 1);
-
-        registry.unregister("test_4").unwrap();
-        assert_eq!(registry.count(), 0);
-    }
-
-    #[test]
-    fn test_execution_history() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_5", "Test 5", "test5.lua");
-
-        registry.register(script);
-
-        for i in 0..3 {
-            let result = LuaExecutionResult {
-                script_id: "test_5".to_string(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100 + i as u64,
-                return_value: None,
-            };
-            registry.record_execution(result);
-        }
-
-        let history = registry.get_history("test_5");
-        assert_eq!(history.len(), 3);
-    }
-
-    #[test]
-    fn test_bounded_execution_history_overflow() {
-        let registry = LuaScriptRegistry::with_history_size(10);
-
-        // Add 20 executions to script (max is 10)
-        for i in 0..20 {
-            let result = LuaExecutionResult {
-                script_id: "test_bounded".to_string(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100 + i as u64,
-                return_value: Some(format!("output_{}", i)),
-            };
-            registry.record_execution(result);
-        }
-
-        // History should only contain last 10 (oldest 10 removed)
-        let history = registry.get_history("test_bounded");
-        assert_eq!(history.len(), 10);
-
-        // Should be runs 10-19 (oldest 0-9 dropped)
-        assert_eq!(history[0].output, "Run 10");
-        assert_eq!(history[9].output, "Run 19");
-    }
-
-    #[test]
-    fn test_recent_execution_history() {
-        let registry = LuaScriptRegistry::with_history_size(50);
-
-        // Add 20 executions
-        for i in 0..20 {
-            let result = LuaExecutionResult {
-                script_id: "test_recent".to_string(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100 + i as u64,
-                return_value: None,
-            };
-            registry.record_execution(result);
-        }
-
-        // Get last 5 (newest first)
-        let recent = registry.get_recent_history("test_recent", 5);
-        assert_eq!(recent.len(), 5);
-        assert_eq!(recent[0].output, "Run 19"); // Newest
-        assert_eq!(recent[4].output, "Run 15"); // 5th newest
-    }
-
-    #[test]
-    fn test_history_per_script_isolated() {
-        let registry = LuaScriptRegistry::with_history_size(5);
-
-        // Add executions for two different scripts
-        for i in 0..10 {
-            let result_a = LuaExecutionResult {
-                script_id: "script_a".to_string(),
-                success: true,
-                output: format!("A-{}", i),
-                error: None,
-                execution_time_ms: 100 + i as u64,
-                return_value: None,
-            };
-            registry.record_execution(result_a);
-
-            let result_b = LuaExecutionResult {
-                script_id: "script_b".to_string(),
-                success: true,
-                output: format!("B-{}", i),
-                error: None,
-                execution_time_ms: 200 + i as u64,
-                return_value: None,
-            };
-            registry.record_execution(result_b);
-        }
-
-        // Each script should have only last 5 (bounded independently)
-        let history_a = registry.get_history("script_a");
-        let history_b = registry.get_history("script_b");
-
-        assert_eq!(history_a.len(), 5);
-        assert_eq!(history_b.len(), 5);
-
-        assert_eq!(history_a[0].output, "A-5");
-        assert_eq!(history_a[4].output, "A-9");
-
-        assert_eq!(history_b[0].output, "B-5");
-        assert_eq!(history_b[4].output, "B-9");
-    }
-
-    #[test]
-    fn test_list_all_scripts() {
-        let registry = LuaScriptRegistry::new();
-
-        for i in 0..5 {
-            let script = LuaScript::new(
-                format!("script_{}", i),
-                format!("Script {}", i),
-                "script.lua",
+        assert_eq!(
+            ScriptCategory::all(),
+            &[
+                ScriptCategory::Web,
+                ScriptCategory::Dns,
+                ScriptCategory::Smb,
+                ScriptCategory::Ssh,
+                ScriptCategory::Database,
+            ]
+        );
+        for (category, token) in cases {
+            assert_eq!(category.as_str(), token);
+            assert_eq!(category.to_string(), token);
+            assert_eq!(token.parse::<ScriptCategory>(), Ok(category));
+            assert_eq!(
+                token.to_ascii_uppercase().parse::<ScriptCategory>(),
+                Ok(category)
             );
-            registry.register(script);
         }
-
-        let all = registry.list_all();
-        assert_eq!(all.len(), 5);
-    }
-
-    #[test]
-    fn test_list_enabled_scripts() {
-        let registry = LuaScriptRegistry::new();
-
-        for i in 0..3 {
-            let script = LuaScript::new(
-                format!("script_{}", i),
-                format!("Script {}", i),
-                "script.lua",
-            );
-            registry.register(script);
-        }
-
-        registry.set_enabled("script_1", false).unwrap();
-
-        let enabled = registry.list_enabled();
-        assert_eq!(enabled.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_script_execution_within_timeout() {
-        let script = LuaScript::new("test_exec", "Test Execution", "test.lua").with_timeout(5000); // 5 second timeout
-
-        let context =
-            LuaContext::new("http://example.com").with_payload("<script>alert(1)</script>");
-
-        let result = script.execute(context).await;
-
-        assert!(result.success);
-        assert_eq!(result.script_id, script.id.to_string());
-        assert!(result.execution_time_ms < 5000);
-        assert!(result.error.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_script_execution_timeout_enforcement() {
-        let script = LuaScript::new("test_timeout", "Timeout Test", "test.lua").with_timeout(100); // Very short timeout (100ms)
-
-        let context = LuaContext::new("http://example.com");
-
-        // Create a version of execute that sleeps to exceed timeout
-        // For now, just verify timeout is set correctly
-        assert_eq!(script.timeout_ms, 100);
-    }
-
-    #[test]
-    fn test_timeout_configuration() {
-        let script = LuaScript::new("test_config", "Config Test", "test.lua");
-        assert_eq!(script.timeout_ms, 5000); // Default
-
-        let script_custom = script.with_timeout(10000);
-        assert_eq!(script_custom.timeout_ms, 10000);
-    }
-
-    #[test]
-    fn test_lua_sandbox_blocks_os() {
-        let lua = mlua::Lua::new();
-        let result = LuaScript::setup_sandbox(&lua);
-        assert!(result.is_ok());
-
-        // Verify os is blocked
-        let globals = lua.globals();
-        let os_val = globals.get::<_, mlua::Value>("os").unwrap();
-        assert!(os_val.is_nil());
-    }
-
-    #[test]
-    fn test_lua_sandbox_blocks_io() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Verify io is blocked
-        let globals = lua.globals();
-        let io_val = globals.get::<_, mlua::Value>("io").unwrap();
-        assert!(io_val.is_nil());
-    }
-
-    #[test]
-    fn test_lua_sandbox_blocks_debug() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Verify debug is blocked
-        let globals = lua.globals();
-        let debug_val = globals.get::<_, mlua::Value>("debug").unwrap();
-        assert!(debug_val.is_nil());
-    }
-
-    #[test]
-    fn test_lua_sandbox_blocks_package() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Verify package is blocked
-        let globals = lua.globals();
-        let package_val = globals.get::<_, mlua::Value>("package").unwrap();
-        assert!(package_val.is_nil());
-    }
-
-    #[test]
-    fn test_lua_sandbox_blocks_require() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Verify require is blocked
-        let globals = lua.globals();
-        let require_val = globals.get::<_, mlua::Value>("require").unwrap();
-        assert!(require_val.is_nil());
-    }
-
-    #[test]
-    fn test_lua_globals_accessible() {
-        let lua = mlua::Lua::new();
-        let context =
-            LuaContext::new("http://example.com").with_payload("<script>alert(1)</script>");
-
-        let result = LuaScript::setup_sandbox(&lua);
-        assert!(result.is_ok());
-
-        let result = LuaScript::setup_globals(&lua, &context);
-        assert!(result.is_ok());
-
-        // Verify globals are set
-        let globals = lua.globals();
-        let target: String = globals.get("target").unwrap();
-        assert_eq!(target, "http://example.com");
-
-        let payload: String = globals.get("payload").unwrap();
-        assert_eq!(payload, "<script>alert(1)</script>");
-    }
-
-    #[test]
-    fn test_lua_execution_success() {
-        let context = LuaContext::new("http://example.com").with_payload("<xss>");
-
-        let result = LuaScript::execute_lua_sandboxed("test.lua", &context);
-        assert!(result.is_ok());
-
-        let (output, return_value) = result.unwrap();
-        assert!(!output.is_empty());
-        assert_eq!(return_value, "success");
-    }
-
-    #[test]
-    fn test_lua_parameters_table() {
-        let mut params = HashMap::new();
-        params.insert("timeout".to_string(), "5000".to_string());
-        params.insert("retries".to_string(), "3".to_string());
-
-        let context = LuaContext::new("http://example.com")
-            .with_payload("test")
-            .with_parameter("timeout", "5000")
-            .with_parameter("retries", "3");
-
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-        let _ = LuaScript::setup_globals(&lua, &context);
-
-        let globals = lua.globals();
-        let params_table: mlua::Table = globals.get("parameters").unwrap();
-        let timeout: String = params_table.get("timeout").unwrap();
-        assert_eq!(timeout, "5000");
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
-    // COMPREHENSIVE SANDBOX VERIFICATION TESTS
-    // ═════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_sandbox_blocks_os_execute() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call os.execute() - should fail
-        let result: mlua::Result<()> = lua.load("os.execute('whoami')").eval();
-        assert!(result.is_err(), "os.execute should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_os_system() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call os.system() - should fail
-        let result: mlua::Result<()> = lua.load("os.system('rm -rf /')").eval();
-        assert!(result.is_err(), "os.system should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_io_open() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call io.open() - should fail
-        let result: mlua::Result<()> = lua.load("io.open('/etc/passwd')").eval();
-        assert!(result.is_err(), "io.open should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_io_read() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call io.read() - should fail
-        let result: mlua::Result<()> = lua.load("io.read()").eval();
-        assert!(result.is_err(), "io.read should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_package_loadlib() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call package.loadlib() - should fail
-        let result: mlua::Result<()> = lua.load("package.loadlib('libc.so', 'system')").eval();
-        assert!(result.is_err(), "package.loadlib should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_require() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call require() - should fail
-        let result: mlua::Result<()> = lua.load("require('socket')").eval();
-        assert!(result.is_err(), "require should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_load() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call load() with arbitrary code - should fail
-        let result: mlua::Result<()> = lua.load("load('os.execute(\"whoami\")')").eval();
-        assert!(result.is_err(), "load should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_debug_getinfo() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call debug.getinfo() - should fail
-        let result: mlua::Result<()> = lua.load("debug.getinfo(1)").eval();
-        assert!(result.is_err(), "debug.getinfo should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_dofile() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call dofile() - should fail
-        let result: mlua::Result<()> = lua.load("dofile('malicious.lua')").eval();
-        assert!(result.is_err(), "dofile should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_blocks_loadfile() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Try to call loadfile() - should fail
-        let result: mlua::Result<()> = lua.load("loadfile('malicious.lua')").eval();
-        assert!(result.is_err(), "loadfile should be blocked");
-    }
-
-    #[test]
-    fn test_sandbox_memory_limit() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Verify memory limit is set (50MB)
-        // This is a soft check - actual allocation limits are enforced by Lua
-        let globals = lua.globals();
-
-        // Simple script should work
-        let result: mlua::Result<()> = lua.load("x = 1 + 1").eval();
-        assert!(result.is_ok(), "Simple script should work");
-
-        // Very large table allocation might fail due to memory limit
-        // (but depends on system and Lua implementation)
-        // For testing, we just verify the setup doesn't error
-    }
-
-    #[test]
-    fn test_sandbox_timeout_prevents_infinite_loop() {
-        // This test verifies timeout works with sandbox
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // Script that would infinite loop
-        let infinite_loop = "while true do end";
-
-        // Without timeout, this would hang
-        // But our execute() method wraps with timeout
-        // So this test just verifies sandbox setup works
-        let globals = lua.globals();
-        assert!(globals.get::<_, mlua::Value>("os").unwrap().is_nil());
-    }
-
-    #[test]
-    fn test_sandbox_safe_operations_allowed() {
-        let lua = mlua::Lua::new();
-        let _ = LuaScript::setup_sandbox(&lua);
-
-        // These SAFE operations should work fine
-
-        // String operations
-        let result: mlua::Result<String> = lua.load("return string.upper('hello')").eval();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "HELLO");
-
-        // Math operations
-        let result: mlua::Result<i32> = lua.load("return math.abs(-42)").eval();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-
-        // Table operations
-        let result: mlua::Result<i32> = lua
-            .load("local t = {} table.insert(t, 1) table.insert(t, 2) return #t")
-            .eval();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 2);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
-    // COMPREHENSIVE REGISTRY TESTS
-    // ═════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_enable_disable_script() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_enable", "Enable/Disable Test", "test.lua");
-        let script_id = script.id.to_string();
-
-        registry.register(script.clone());
-        assert!(registry.get(&script_id).unwrap().enabled);
-
-        registry.set_enabled(&script_id, false).unwrap();
-        assert!(!registry.get(&script_id).unwrap().enabled);
-
-        registry.set_enabled(&script_id, true).unwrap();
-        assert!(registry.get(&script_id).unwrap().enabled);
-    }
-
-    #[test]
-    fn test_open_close_100_times() {
-        // Stress test: register, unregister, repeat
-        let registry = LuaScriptRegistry::new();
-
-        for i in 0..100 {
-            let script = LuaScript::new(
-                format!("stress_test_{}", i),
-                format!("Stress Test {}", i),
-                "test.lua",
-            );
-            let script_id = script.id.to_string();
-
-            // Register
-            registry.register(script);
-            assert!(registry.get(&script_id).is_some());
-
-            // Unregister by creating a new script with same ID won't work
-            // because UUID is auto-generated. This tests counter persistence.
-        }
-
-        assert_eq!(registry.count(), 100);
-    }
-
-    #[test]
-    fn test_execution_counter_accuracy() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_counter", "Counter Test", "test.lua");
-        let script_id = script.id.to_string();
-
-        registry.register(script);
-
-        // Record 10 executions
-        for i in 0..10 {
-            let result = LuaExecutionResult {
-                script_id: script_id.clone(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100 + i as u64,
-                return_value: Some(format!("result_{}", i)),
-            };
-            registry.record_execution(result);
-        }
-
-        // Verify history count (bounded to 100 by default)
-        let history = registry.get_history(&script_id);
-        assert_eq!(history.len(), 10);
-
-        // Verify order (oldest first)
-        assert_eq!(history[0].output, "Run 0");
-        assert_eq!(history[9].output, "Run 9");
-    }
-
-    #[test]
-    fn test_unregister_not_found() {
-        let registry = LuaScriptRegistry::new();
-
-        // Try to disable non-existent script
-        let result = registry.set_enabled("nonexistent", false);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_history_cleanup_on_remove() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_cleanup", "Cleanup Test", "test.lua");
-        let script_id = script.id.to_string();
-
-        registry.register(script);
-
-        // Record some executions
-        for i in 0..5 {
-            let result = LuaExecutionResult {
-                script_id: script_id.clone(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100,
-                return_value: None,
-            };
-            registry.record_execution(result);
-        }
-
-        // Verify history exists
-        let history_before = registry.get_history(&script_id);
-        assert_eq!(history_before.len(), 5);
-
-        // Note: Current registry doesn't have delete(), but this test
-        // documents expected behavior: history should be cleaned up when script removed
-    }
-
-    #[test]
-    fn test_duplicate_id_rejection() {
-        let registry = LuaScriptRegistry::new();
-
-        // Create two scripts with SAME UUID (manually for testing)
-        let script1 = LuaScript::new_unsafe("script_1", "test1.lua");
-        let script2 = LuaScript::new_unsafe("script_2", "test2.lua");
-
-        registry.register(script1.clone());
-        registry.register(script2); // Same ID overwrites script1
-
-        // Only script2 should be registered (last write wins)
-        let retrieved = registry.get(&script2.id.to_string()).unwrap();
-        assert_eq!(retrieved.name, "script_2");
-    }
-
-    #[test]
-    fn test_same_id_registered_twice() {
-        let registry = LuaScriptRegistry::new();
-        let script = LuaScript::new("test_duplicate", "Duplicate Test", "test.lua");
-        let script_id = script.id.to_string();
-
-        // Register same script twice
-        registry.register(script.clone());
-        assert_eq!(registry.count(), 1);
-
-        registry.register(script); // Register again
-        assert_eq!(registry.count(), 1); // Should still be 1 (overwrites)
-    }
-
-    #[test]
-    fn test_invalid_path_rejected() {
-        // Try to create script with path outside root
-        let root = std::path::Path::new("./scripts");
-        let result = LuaScript::new_safe("evil", "../../../../etc/passwd", root);
-
-        // Should error due to path traversal
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Path traversal"));
-    }
-
-    #[test]
-    fn test_valid_path_accepted() {
-        // Create temp directory for testing
-        use std::fs;
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let root = temp_dir.path();
-
-        // Create a valid script file within root
-        let script_path = root.join("test.lua");
-        fs::write(&script_path, "return 42").unwrap();
-
-        let result = LuaScript::new_safe("valid", script_path, root);
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_register_100_threads() {
-        use tokio::task;
-
-        let registry = std::sync::Arc::new(LuaScriptRegistry::new());
-        let mut handles = vec![];
-
-        // Spawn 100 concurrent registration tasks
-        for i in 0..100 {
-            let registry_clone = registry.clone();
-            let handle = task::spawn(async move {
-                let script = LuaScript::new(
-                    format!("concurrent_{}", i),
-                    format!("Concurrent Test {}", i),
-                    "test.lua",
-                );
-                registry_clone.register(script);
-                i
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all to complete
-        for handle in handles {
-            let _ = handle.await;
-        }
-
-        // Verify all registered (or mostly - race conditions possible)
-        assert!(registry.count() > 90); // Allow some race conditions
-    }
-
-    #[test]
-    fn test_history_memory_bounded() {
-        let registry = LuaScriptRegistry::with_history_size(10);
-        let script = LuaScript::new("test_bounded", "Bounded Test", "test.lua");
-        let script_id = script.id.to_string();
-
-        registry.register(script);
-
-        // Add 50 executions
-        for i in 0..50 {
-            let result = LuaExecutionResult {
-                script_id: script_id.clone(),
-                success: true,
-                output: format!("Run {}", i),
-                error: None,
-                execution_time_ms: 100,
-                return_value: None,
-            };
-            registry.record_execution(result);
-        }
-
-        // Should only keep last 10
-        let history = registry.get_history(&script_id);
-        assert_eq!(history.len(), 10);
-        assert_eq!(history[0].output, "Run 40"); // Oldest (of last 10)
-        assert_eq!(history[9].output, "Run 49"); // Newest
-    }
-
-    #[test]
-    fn test_enabled_count_tracking() {
-        let registry = LuaScriptRegistry::new();
-
-        // Create and register 5 scripts
-        for i in 0..5 {
-            let script = LuaScript::new(
-                format!("count_test_{}", i),
-                format!("Count Test {}", i),
-                "test.lua",
-            );
-            registry.register(script);
-        }
-
-        assert_eq!(registry.enabled_count(), 5);
-
-        // Disable 2
-        let all = registry.list_all();
-        if all.len() >= 2 {
-            registry.set_enabled(&all[0].id.to_string(), false).ok();
-            registry.set_enabled(&all[1].id.to_string(), false).ok();
-        }
-
-        // This would require tracking enabled_count in registry
-        // Currently not implemented, but test documents requirement
-    }
-
-    #[test]
-    fn test_script_metadata_instance_separation() {
-        // Test new metadata/instance split (P1 refactor)
-        let metadata = LuaScriptMetadata {
-            id: Uuid::new_v4(),
-            name: "test".to_string(),
-            version: "1.0".to_string(),
-            description: "Test script".to_string(),
-            author: "Test Author".to_string(),
-            script_path: std::path::PathBuf::from("test.lua"),
-            categories: vec![],
-            timeout_ms: 5000,
-        };
-
-        let instance = LuaScriptInstance {
-            metadata: metadata.clone(),
-            enabled: true,
-            status: LuaScriptStatus::Loaded,
-            execution_count: 0,
-            last_run_time_ms: None,
-            last_error: None,
-        };
-
-        // Metadata should be immutable
-        assert_eq!(instance.metadata, metadata);
-
-        // Instance state should be independent
-        let mut instance2 = instance.clone();
-        instance2.execution_count = 5;
-        instance2.status = LuaScriptStatus::Running;
-
-        // Original metadata unchanged
-        assert_eq!(instance.metadata, metadata);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════
-    // EXPONENTIAL DECAY TESTS (P0 - not FIFO!)
-    // ═════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_exponential_decay_current_has_full_weight() {
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000); // 5min half-life
-        let current_time = 1000000;
-
-        let entry = LuaExecutionResult {
-            script_id: "test".to_string(),
-            success: true,
-            output: "test".to_string(),
-            error: None,
-            execution_time_ms: 100,
-            return_value: None,
-            timestamp_ms: current_time, // Current time
-        };
-
-        let weight = history.decay_weight(&entry, current_time);
-        assert!(
-            (weight - 1.0).abs() < 0.01,
-            "Current entry should have weight ~1.0, got {}",
-            weight
+        assert_eq!(
+            "unknown".parse::<ScriptCategory>(),
+            Err(LuaRegistrationError::InvalidCategory)
         );
     }
 
     #[test]
-    fn test_exponential_decay_half_life_is_0_5() {
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000); // 5min half-life
-        let current_time = 1000000;
-        let half_life_ago = current_time - (5 * 60 * 1000); // 5 minutes ago
+    fn error_text_and_source_contracts_are_exhaustive() {
+        let mut invalid_config = test_config();
+        invalid_config.history_size = 0;
+        let config_error = invalid_config.validate().expect_err("invalid config");
 
-        let entry = LuaExecutionResult {
-            script_id: "test".to_string(),
-            success: true,
-            output: "test".to_string(),
-            error: None,
-            execution_time_ms: 100,
-            return_value: None,
-            timestamp_ms: half_life_ago,
-        };
+        let registration_errors = [
+            (
+                LuaRegistrationError::InvalidConfig(config_error),
+                "invalid Lua engine configuration",
+            ),
+            (LuaRegistrationError::InvalidName, "invalid Lua script name"),
+            (
+                LuaRegistrationError::InvalidVersion,
+                "invalid Lua script version",
+            ),
+            (
+                LuaRegistrationError::InvalidCategory,
+                "invalid Lua script category",
+            ),
+            (LuaRegistrationError::InvalidPath, "invalid Lua script path"),
+            (
+                LuaRegistrationError::OutsideApprovedRoot,
+                "Lua script is outside the approved root",
+            ),
+            (
+                LuaRegistrationError::SymlinkRejected,
+                "Lua script path contains a symbolic link",
+            ),
+            (
+                LuaRegistrationError::NotRegularFile,
+                "Lua script source is not a regular file",
+            ),
+            (
+                LuaRegistrationError::SourceTooLarge,
+                "Lua script source exceeds its configured limit",
+            ),
+            (
+                LuaRegistrationError::SourceNotUtf8,
+                "Lua script source must be UTF-8 text",
+            ),
+            (
+                LuaRegistrationError::SourceChangedDuringRegistration,
+                "Lua script source changed during registration",
+            ),
+            (
+                LuaRegistrationError::SourceReadFailed,
+                "Lua script source could not be read",
+            ),
+        ];
+        for (error, message) in registration_errors {
+            assert_eq!(error.to_string(), message);
+            assert_eq!(
+                std::error::Error::source(&error).is_some(),
+                matches!(error, LuaRegistrationError::InvalidConfig(_))
+            );
+        }
 
-        let weight = history.decay_weight(&entry, current_time);
-        assert!(
-            (weight - 0.5).abs() < 0.01,
-            "At half-life, weight should be ~0.5, got {}",
-            weight
+        let execution_errors = [
+            (LuaExecutionError::ScriptDisabled, "script is disabled"),
+            (
+                LuaExecutionError::ConcurrencyLimit,
+                "concurrent execution limit reached",
+            ),
+            (
+                LuaExecutionError::ContextTargetLimit,
+                "context target limit exceeded",
+            ),
+            (
+                LuaExecutionError::ContextPayloadLimit,
+                "context payload limit exceeded",
+            ),
+            (
+                LuaExecutionError::ContextParameterCountLimit,
+                "context parameter count limit exceeded",
+            ),
+            (
+                LuaExecutionError::ContextParameterKeyLimit,
+                "context parameter key limit exceeded",
+            ),
+            (
+                LuaExecutionError::ContextParameterValueLimit,
+                "context parameter value limit exceeded",
+            ),
+            (
+                LuaExecutionError::ContextTotalLimit,
+                "context total limit exceeded",
+            ),
+            (LuaExecutionError::Syntax, "script syntax error"),
+            (LuaExecutionError::Runtime, "script runtime error"),
+            (
+                LuaExecutionError::MemoryLimit,
+                "Lua VM memory limit exceeded",
+            ),
+            (
+                LuaExecutionError::InstructionLimit,
+                "Lua VM instruction limit exceeded",
+            ),
+            (
+                LuaExecutionError::DeadlineExceeded,
+                "Lua execution deadline exceeded",
+            ),
+            (LuaExecutionError::Cancelled, "Lua execution cancelled"),
+            (LuaExecutionError::OutputLimit, "Lua output limit exceeded"),
+            (LuaExecutionError::OutputNotUtf8, "Lua output must be UTF-8"),
+            (
+                LuaExecutionError::UnsupportedOutputType,
+                "Lua emitted an unsupported value type",
+            ),
+            (
+                LuaExecutionError::NonFiniteOutputNumber,
+                "Lua emitted a non-finite number",
+            ),
+            (
+                LuaExecutionError::ReturnLimit,
+                "Lua return value limit exceeded",
+            ),
+            (
+                LuaExecutionError::ReturnNotUtf8,
+                "Lua return string must be UTF-8",
+            ),
+            (
+                LuaExecutionError::NonFiniteReturnNumber,
+                "Lua returned a non-finite number",
+            ),
+            (
+                LuaExecutionError::UnsupportedReturnType,
+                "Lua returned an unsupported value type",
+            ),
+            (
+                LuaExecutionError::MultipleReturnValues,
+                "Lua returned more than one value",
+            ),
+            (LuaExecutionError::HostFailure, "Lua host failure"),
+        ];
+        for (error, message) in execution_errors {
+            assert_eq!(error.to_string(), message);
+        }
+
+        let registry_errors = [
+            (
+                LuaRegistryError::InvalidConfig(config_error),
+                "invalid Lua registry configuration",
+            ),
+            (
+                LuaRegistryError::DuplicateId,
+                "Lua script ID is already registered",
+            ),
+            (
+                LuaRegistryError::DuplicateName,
+                "Lua script name is already registered",
+            ),
+            (
+                LuaRegistryError::ScriptCapacity,
+                "Lua script registry capacity reached",
+            ),
+            (
+                LuaRegistryError::SourceLimit,
+                "Lua script exceeds this registry source limit",
+            ),
+            (
+                LuaRegistryError::TotalSourceCapacity,
+                "Lua registry source-byte capacity reached",
+            ),
+            (LuaRegistryError::ScriptNotFound, "Lua script not found"),
+            (
+                LuaRegistryError::ScriptInUse,
+                "Lua script has an active invocation",
+            ),
+            (
+                LuaRegistryError::InvocationLimit,
+                "Lua script invocation counter exhausted",
+            ),
+            (
+                LuaRegistryError::RegistrationGenerationExhausted,
+                "Lua registry generation sequence exhausted",
+            ),
+            (
+                LuaRegistryError::HistorySequenceExhausted,
+                "Lua history sequence exhausted",
+            ),
+            (
+                LuaRegistryError::StateUnavailable,
+                "Lua registry state unavailable",
+            ),
+        ];
+        for (error, message) in registry_errors {
+            assert_eq!(error.to_string(), message);
+            assert_eq!(
+                std::error::Error::source(&error).is_some(),
+                matches!(error, LuaRegistryError::InvalidConfig(_))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn executes_registered_snapshot_and_projects_scalar_return() {
+        let result = run(
+            "emit(context.target); return context.parameter('mode')",
+            LuaContext::new("fixture-target").with_parameter("mode", "safe"),
+        )
+        .await;
+        assert_eq!(result.status(), LuaExecutionStatus::Completed);
+        assert_eq!(result.output(), "fixture-target");
+        assert_eq!(
+            result.return_value(),
+            Some(&LuaReturnValue::String("safe".to_owned()))
         );
     }
 
-    #[test]
-    fn test_exponential_decay_9_min_is_20_percent() {
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000); // 5min half-life
-        let current_time = 1000000;
-        let nine_min_ago = current_time - (9 * 60 * 1000);
-
-        let entry = LuaExecutionResult {
-            script_id: "test".to_string(),
-            success: true,
-            output: "test".to_string(),
-            error: None,
-            execution_time_ms: 100,
-            return_value: None,
-            timestamp_ms: nine_min_ago,
-        };
-
-        let weight = history.decay_weight(&entry, current_time);
-        // At 9 min with 5 min half-life: 0.5^(9/5) = 0.5^1.8 ≈ 0.287
-        assert!(weight < 0.3, "9 minutes old should be <30%, got {}", weight);
-        assert!(weight > 0.2, "9 minutes old should be >20%, got {}", weight);
-    }
-
-    #[test]
-    fn test_success_rate_decayed_recent_matters_more() {
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
-        let base_time = 1000000;
-
-        // Add 2 old failed executions
-        for i in 0..2 {
-            history.push(LuaExecutionResult {
-                script_id: "test".to_string(),
-                success: false, // Failed
-                output: "fail".to_string(),
-                error: None,
-                execution_time_ms: 100,
-                return_value: None,
-                timestamp_ms: base_time - (10 * 60 * 1000), // 10 min ago (very low weight)
-            });
-        }
-
-        // Add 8 recent successful executions
-        for i in 0..8 {
-            history.push(LuaExecutionResult {
-                script_id: "test".to_string(),
-                success: true, // Success
-                output: "success".to_string(),
-                error: None,
-                execution_time_ms: 50,
-                return_value: None,
-                timestamp_ms: base_time - (1 * 60 * 1000), // 1 min ago (high weight)
-            });
-        }
-
-        let success_rate = history.success_rate_decayed(base_time);
-
-        // Should be much higher than 0.8 (8/10) because recent successes matter more
-        assert!(
-            success_rate > 0.85,
-            "Recent successes should dominate, got {}",
-            success_rate
+    #[tokio::test]
+    async fn supported_scalar_return_domain_is_exact() {
+        let boolean = run("return true", LuaContext::new("target")).await;
+        assert_eq!(boolean.return_value(), Some(&LuaReturnValue::Boolean(true)));
+        let integer = run("return 42", LuaContext::new("target")).await;
+        assert_eq!(integer.return_value(), Some(&LuaReturnValue::Integer(42)));
+        let number = run("return 1.5", LuaContext::new("target")).await;
+        assert_eq!(number.return_value(), Some(&LuaReturnValue::Number(1.5)));
+        let nil = run("return nil", LuaContext::new("target")).await;
+        assert_eq!(nil.return_value(), None);
+        let table = run("return {}", LuaContext::new("target")).await;
+        assert_eq!(
+            table.error(),
+            Some(LuaExecutionError::UnsupportedReturnType)
+        );
+        let non_finite = run("return 0 / 0", LuaContext::new("target")).await;
+        assert_eq!(
+            non_finite.error(),
+            Some(LuaExecutionError::NonFiniteReturnNumber)
+        );
+        let multiple = run("return true, false", LuaContext::new("target")).await;
+        assert_eq!(
+            multiple.error(),
+            Some(LuaExecutionError::MultipleReturnValues)
         );
     }
 
-    #[test]
-    fn test_avg_time_decayed_recent_execution_time_weighted() {
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
-        let base_time = 1000000;
+    #[tokio::test]
+    async fn syntax_and_runtime_errors_are_typed_and_sanitized() {
+        let syntax = run("local =", LuaContext::new("secret-target")).await;
+        assert_eq!(syntax.error(), Some(LuaExecutionError::Syntax));
+        assert!(!format!("{syntax:?}").contains("secret-target"));
 
-        // Add 1 old fast execution (10ms)
-        history.push(LuaExecutionResult {
-            script_id: "test".to_string(),
-            success: true,
-            output: "fast".to_string(),
-            error: None,
-            execution_time_ms: 10, // Very fast
-            return_value: None,
-            timestamp_ms: base_time - (10 * 60 * 1000), // 10 min ago (low weight)
+        let runtime = run(
+            "local missing = nil; return missing.field",
+            LuaContext::new("secret-target"),
+        )
+        .await;
+        assert_eq!(runtime.error(), Some(LuaExecutionError::Runtime));
+        assert!(!format!("{runtime:?}").contains("secret-target"));
+
+        let forged_abort = run(
+            "return context['venom:cancelled']()",
+            LuaContext::new("target"),
+        )
+        .await;
+        assert_eq!(forged_abort.error(), Some(LuaExecutionError::Runtime));
+        assert_eq!(forged_abort.status(), LuaExecutionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn result_and_context_debug_redact_sensitive_values() {
+        let context = LuaContext::new("target-secret")
+            .with_payload("payload-secret")
+            .with_parameter("token", "parameter-secret");
+        let context_debug = format!("{context:?}");
+        for secret in ["target-secret", "payload-secret", "parameter-secret"] {
+            assert!(!context_debug.contains(secret));
+        }
+
+        let result = run("emit(context.target); return context.payload", context).await;
+        let result_debug = format!("{result:?}");
+        for secret in ["target-secret", "payload-secret"] {
+            assert!(!result_debug.contains(secret));
+        }
+        assert_eq!(
+            format!("{:?}", LuaReturnValue::Boolean(true)),
+            "Boolean(<redacted>)"
+        );
+        assert_eq!(
+            format!("{:?}", LuaReturnValue::Integer(42)),
+            "Integer(<redacted>)"
+        );
+        assert_eq!(
+            format!("{:?}", LuaReturnValue::Number(1.5)),
+            "Number(<redacted>)"
+        );
+    }
+
+    #[tokio::test]
+    async fn infinite_loop_is_actually_interrupted_by_instruction_hook() {
+        let result = run("while true do end", LuaContext::new("target")).await;
+        assert_eq!(result.error(), Some(LuaExecutionError::InstructionLimit));
+        assert_eq!(result.status(), LuaExecutionStatus::TimedOut);
+    }
+
+    #[test]
+    fn non_divisible_instruction_quantum_stops_before_the_next_over_limit_hook() {
+        assert_eq!(instruction_quantum_status(0, 100, 250), (100, false));
+        let (aborted_at, exhausted) = instruction_quantum_status(100, 100, 250);
+        assert_eq!(aborted_at, 200);
+        assert!(exhausted);
+        assert!(aborted_at <= 250);
+
+        assert_eq!(instruction_quantum_status(0, 100, 200), (100, false));
+        assert_eq!(instruction_quantum_status(100, 100, 200), (200, true));
+        assert_eq!(
+            instruction_quantum_status(u64::MAX - 50, 100, u64::MAX),
+            (u64::MAX, true)
+        );
+        assert_eq!(
+            instruction_quantum_status(u64::MAX - 150, 100, u64::MAX),
+            (u64::MAX - 50, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_divisible_instruction_ceiling_allows_finite_and_interrupts_over_ceiling_code() {
+        let mut config = test_config();
+        config.instruction_limit = 250;
+        config.hook_interval = 100;
+        let (_finite_root, finite) =
+            fixture_with_config(b"local value = 1; value = value + 1; return value", &config);
+        let finite_id = finite.id();
+        let finite_registry = LuaScriptRegistry::from_config(&config).expect("finite registry");
+        finite_registry
+            .register(finite)
+            .expect("finite registration");
+        let completed = finite_registry
+            .execute(&finite_id, LuaContext::new("target"))
+            .await
+            .expect("finite execution");
+        assert_eq!(completed.status(), LuaExecutionStatus::Completed);
+        assert_eq!(completed.return_value(), Some(&LuaReturnValue::Integer(2)));
+
+        let (_infinite_root, infinite) = fixture_with_config(b"while true do end", &config);
+        let infinite_id = infinite.id();
+        let infinite_registry = LuaScriptRegistry::from_config(&config).expect("infinite registry");
+        infinite_registry
+            .register(infinite)
+            .expect("infinite registration");
+        let interrupted = infinite_registry
+            .execute(&infinite_id, LuaContext::new("target"))
+            .await
+            .expect("infinite execution");
+        assert_eq!(
+            interrupted.error(),
+            Some(LuaExecutionError::InstructionLimit)
+        );
+    }
+
+    #[tokio::test]
+    async fn monotonic_deadline_is_distinct_from_instruction_limit() {
+        let mut config = test_config();
+        config.default_timeout_ms = 1;
+        config.instruction_limit = 100_000_000;
+        config.hook_interval = 100;
+        let (_root, script) = fixture_with_config(b"while true do end", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        let result = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(result.error(), Some(LuaExecutionError::DeadlineExceeded));
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_running_lua_on_a_blocking_worker() {
+        let mut config = test_config();
+        config.default_timeout_ms = 5_000;
+        config.instruction_limit = 100_000_000;
+        config.hook_interval = 100;
+        let (_root, script) = fixture_with_config(b"while true do end", &config);
+        let id = script.id();
+        let registry = Arc::new(LuaScriptRegistry::from_config(&config).expect("registry"));
+        registry.register(script).expect("register");
+        let cancellation = LuaCancellationToken::new();
+        let worker_registry = Arc::clone(&registry);
+        let worker_id = id.clone();
+        let worker_cancellation = cancellation.clone();
+        let worker = tokio::spawn(async move {
+            worker_registry
+                .execute_with_cancellation(
+                    &worker_id,
+                    LuaContext::new("target"),
+                    worker_cancellation,
+                )
+                .await
         });
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+        let result = worker.await.expect("worker").expect("execute");
+        assert_eq!(result.error(), Some(LuaExecutionError::Cancelled));
+    }
 
-        // Add 1 recent slow execution (1000ms)
-        history.push(LuaExecutionResult {
-            script_id: "test".to_string(),
-            success: true,
-            output: "slow".to_string(),
-            error: None,
-            execution_time_ms: 1000, // Very slow
-            return_value: None,
-            timestamp_ms: base_time - (1 * 60 * 1000), // 1 min ago (high weight)
+    #[test]
+    fn single_concurrency_permit_rejects_second_vm_and_is_reusable() {
+        let mut config = test_config();
+        config.max_concurrent_executions = 1;
+        config.default_timeout_ms = 5_000;
+        config.instruction_limit = 100_000_000;
+        config.hook_interval = 10_000;
+        let root = tempfile::tempdir().expect("root");
+        let holding_path = root.path().join("holding.lua");
+        let finite_path = root.path().join("finite.lua");
+        fs::write(&holding_path, "while true do end").expect("holding source");
+        fs::write(&finite_path, "return true").expect("finite source");
+        let holding =
+            LuaScript::new_safe_with_config("holding", &holding_path, root.path(), &config)
+                .expect("holding script");
+        let finite = LuaScript::new_safe_with_config("finite", &finite_path, root.path(), &config)
+            .expect("finite script");
+        let holding_id = holding.id();
+        let finite_id = finite.id();
+        let registry = Arc::new(LuaScriptRegistry::from_config(&config).expect("registry"));
+        registry.register(holding).expect("holding registration");
+        registry.register(finite).expect("finite registration");
+
+        let blocking_gate = Arc::new((Mutex::new((false, false)), std::sync::Condvar::new()));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let worker_gate = Arc::clone(&blocking_gate);
+        let blocking_worker = runtime.spawn_blocking(move || {
+            let (state, condition) = &*worker_gate;
+            let mut state = state.lock().expect("blocking gate");
+            state.0 = true;
+            condition.notify_all();
+            while !state.1 {
+                state = condition.wait(state).expect("blocking gate");
+            }
         });
+        {
+            let (state, condition) = &*blocking_gate;
+            let mut state = state.lock().expect("blocking gate");
+            while !state.0 {
+                state = condition.wait(state).expect("blocking gate");
+            }
+        }
 
-        let avg_time = history.avg_time_decayed(base_time);
+        runtime.block_on(async {
+            let cancellation = LuaCancellationToken::new();
+            let worker_registry = Arc::clone(&registry);
+            let worker_id = holding_id.clone();
+            let worker_cancellation = cancellation.clone();
+            let worker = tokio::spawn(async move {
+                worker_registry
+                    .execute_with_cancellation(
+                        &worker_id,
+                        LuaContext::new("holding"),
+                        worker_cancellation,
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let active = registry
+                        .state
+                        .lock()
+                        .expect("registry state")
+                        .scripts
+                        .get(&holding_id)
+                        .expect("holding script")
+                        .active_invocations;
+                    if active == 1 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("holding invocation acquired its lease");
 
-        // Should be closer to 1000 than 10 because recent data matters more
-        assert!(
-            avg_time > 800.0,
-            "Recent slow execution should dominate, got {}",
-            avg_time
+            let rejected = registry
+                .execute(&finite_id, LuaContext::new("second"))
+                .await
+                .expect("typed concurrency rejection");
+            assert_eq!(rejected.error(), Some(LuaExecutionError::ConcurrencyLimit));
+            assert_eq!(
+                registry
+                    .state
+                    .lock()
+                    .expect("registry state")
+                    .scripts
+                    .get(&finite_id)
+                    .expect("finite script")
+                    .active_invocations,
+                0
+            );
+
+            cancellation.cancel();
+            {
+                let (state, condition) = &*blocking_gate;
+                let mut state = state.lock().expect("blocking gate");
+                state.1 = true;
+                condition.notify_all();
+            }
+            blocking_worker.await.expect("blocking worker");
+            let cancelled = worker.await.expect("worker").expect("holding execution");
+            assert_eq!(cancelled.error(), Some(LuaExecutionError::Cancelled));
+            assert_eq!(
+                registry
+                    .state
+                    .lock()
+                    .expect("registry state")
+                    .scripts
+                    .get(&holding_id)
+                    .expect("holding script")
+                    .active_invocations,
+                0
+            );
+
+            let reused = registry
+                .execute(&finite_id, LuaContext::new("reused"))
+                .await
+                .expect("reused permit");
+            assert_eq!(reused.status(), LuaExecutionStatus::Completed);
+            assert_eq!(reused.return_value(), Some(&LuaReturnValue::Boolean(true)));
+        });
+    }
+
+    #[test]
+    fn blocking_worker_preflight_checks_cancel_and_queue_deadline_before_vm_creation() {
+        let config = test_config();
+        let (_root, script) = fixture_with_config(b"return true", &config);
+        let stale_start = Instant::now()
+            .checked_sub(Duration::from_millis(config.default_timeout_ms + 1))
+            .expect("stale start");
+        let expired = execute_snapshot(
+            script.clone(),
+            LuaContext::new("target"),
+            config.clone(),
+            LuaCancellationToken::new(),
+            stale_start,
+        );
+        assert_eq!(expired.error(), Some(LuaExecutionError::DeadlineExceeded));
+
+        let cancellation = LuaCancellationToken::new();
+        cancellation.cancel();
+        let cancelled = execute_snapshot(
+            script,
+            LuaContext::new("target"),
+            config,
+            cancellation,
+            stale_start,
+        );
+        assert_eq!(cancelled.error(), Some(LuaExecutionError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn pcall_coroutines_and_all_standard_libraries_are_absent() {
+        let result = run(
+            "return pcall == nil and xpcall == nil and coroutine == nil and os == nil and io == nil and debug == nil and package == nil and load == nil and dofile == nil and loadfile == nil and require == nil and print == nil and warn == nil and collectgarbage == nil and math == nil and string == nil and table == nil and utf8 == nil",
+            LuaContext::new("target"),
+        )
+        .await;
+        assert_eq!(result.return_value(), Some(&LuaReturnValue::Boolean(true)));
+
+        let method = run("return ('x'):match('x')", LuaContext::new("target")).await;
+        assert_eq!(method.error(), Some(LuaExecutionError::Runtime));
+    }
+
+    #[tokio::test]
+    async fn memory_bomb_fails_with_fixed_memory_code() {
+        let result = run(
+            "local value = 'xxxxxxxx'; while true do value = value .. value end",
+            LuaContext::new("target"),
+        )
+        .await;
+        assert_eq!(result.error(), Some(LuaExecutionError::MemoryLimit));
+    }
+
+    #[tokio::test]
+    async fn context_is_immutable_and_parameter_order_is_stable() {
+        let result = run(
+            "context.target = 'changed'; return context.target",
+            LuaContext::new("original"),
+        )
+        .await;
+        assert_eq!(result.error(), Some(LuaExecutionError::Runtime));
+
+        let result = run(
+            "local a, av = context.parameter_at(1); local b, bv = context.parameter_at(2); emit(a .. '=' .. av .. ',' .. b .. '=' .. bv)",
+            LuaContext::new("target")
+                .with_parameter("z", "last")
+                .with_parameter("a", "first"),
+        )
+        .await;
+        assert_eq!(result.output(), "a=first,z=last");
+    }
+
+    #[tokio::test]
+    async fn output_cap_enforces_exact_boundary_plus_one() {
+        let mut config = test_config();
+        config.max_output_bytes = 4;
+        let root = tempfile::tempdir().expect("root");
+        let exact_path = root.path().join("exact.lua");
+        fs::write(&exact_path, "emit('1234')").expect("source");
+        let exact_script =
+            LuaScript::new_safe_with_config("exact", &exact_path, root.path(), &config)
+                .expect("script");
+        let exact_id = exact_script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(exact_script).expect("register");
+        let exact = registry
+            .execute(&exact_id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert!(exact.success());
+        assert_eq!(exact.output(), "1234");
+
+        let plus_path = root.path().join("plus.lua");
+        fs::write(&plus_path, "emit('12345')").expect("source");
+        let plus_script = LuaScript::new_safe_with_config("plus", &plus_path, root.path(), &config)
+            .expect("script");
+        let plus_id = plus_script.id();
+        registry.register(plus_script).expect("register");
+        let plus = registry
+            .execute(&plus_id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(plus.error(), Some(LuaExecutionError::OutputLimit));
+        assert!(plus.output().is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_vm_string_is_rejected_before_any_rust_heap_clone() {
+        let mut config = test_config();
+        config.max_output_bytes = 4;
+        let (_root, script) = fixture_with_config(
+            b"local value = '12345678'; for _ = 1, 8 do value = value .. value end; emit(value)",
+            &config,
+        );
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        let result = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(result.error(), Some(LuaExecutionError::OutputLimit));
+        assert!(result.output().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_nonfinite_and_non_utf8_output_are_distinct() {
+        let unsupported = run("emit({})", LuaContext::new("target")).await;
+        assert_eq!(
+            unsupported.error(),
+            Some(LuaExecutionError::UnsupportedOutputType)
+        );
+
+        let nonfinite = run("emit(0 / 0)", LuaContext::new("target")).await;
+        assert_eq!(
+            nonfinite.error(),
+            Some(LuaExecutionError::NonFiniteOutputNumber)
+        );
+
+        let invalid_utf8 = run("emit('\\255')", LuaContext::new("target")).await;
+        assert_eq!(invalid_utf8.error(), Some(LuaExecutionError::OutputNotUtf8));
+    }
+
+    #[tokio::test]
+    async fn return_cap_enforces_exact_boundary_plus_one() {
+        let mut config = test_config();
+        config.max_return_bytes = 4;
+        let root = tempfile::tempdir().expect("root");
+        let exact_path = root.path().join("exact.lua");
+        fs::write(&exact_path, "return '1234'").expect("source");
+        let exact_script =
+            LuaScript::new_safe_with_config("exact", &exact_path, root.path(), &config)
+                .expect("script");
+        let exact_id = exact_script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(exact_script).expect("register");
+        let exact = registry
+            .execute(&exact_id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(
+            exact.return_value(),
+            Some(&LuaReturnValue::String("1234".to_owned()))
+        );
+
+        let plus_path = root.path().join("plus.lua");
+        fs::write(&plus_path, "return '12345'").expect("source");
+        let plus_script = LuaScript::new_safe_with_config("plus", &plus_path, root.path(), &config)
+            .expect("script");
+        let plus_id = plus_script.id();
+        registry.register(plus_script).expect("register");
+        let plus = registry
+            .execute(&plus_id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(plus.error(), Some(LuaExecutionError::ReturnLimit));
+    }
+
+    #[tokio::test]
+    async fn each_context_limit_is_checked_before_vm_creation() {
+        let mut config = test_config();
+        config.max_target_bytes = 4;
+        config.max_payload_bytes = 4;
+        config.max_parameters = 1;
+        config.max_parameter_key_bytes = 4;
+        config.max_parameter_value_bytes = 4;
+        config.max_context_bytes = 8;
+        let (_root, script) = fixture_with_config(b"return true", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+
+        for (context, expected) in [
+            (
+                LuaContext::new("12345"),
+                LuaExecutionError::ContextTargetLimit,
+            ),
+            (
+                LuaContext::new("").with_payload("12345"),
+                LuaExecutionError::ContextPayloadLimit,
+            ),
+            (
+                LuaContext::new("")
+                    .with_parameter("a", "")
+                    .with_parameter("b", ""),
+                LuaExecutionError::ContextParameterCountLimit,
+            ),
+            (
+                LuaContext::new("").with_parameter("12345", ""),
+                LuaExecutionError::ContextParameterKeyLimit,
+            ),
+            (
+                LuaContext::new("").with_parameter("a", "12345"),
+                LuaExecutionError::ContextParameterValueLimit,
+            ),
+            (
+                LuaContext::new("1234")
+                    .with_payload("1234")
+                    .with_parameter("a", ""),
+                LuaExecutionError::ContextTotalLimit,
+            ),
+        ] {
+            let result = registry.execute(&id, context).await.expect("execute");
+            assert_eq!(result.error(), Some(expected));
+            assert_eq!(result.status(), LuaExecutionStatus::Rejected);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_snapshot_survives_later_file_replacement() {
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("fixture.lua");
+        fs::write(&path, "return 'original'").expect("source");
+        let script = LuaScript::new_safe_with_config("snapshot", &path, root.path(), &config)
+            .expect("script");
+        fs::write(&path, "return 'replacement'").expect("replacement");
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        let result = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(
+            result.return_value(),
+            Some(&LuaReturnValue::String("original".to_owned()))
         );
     }
 
     #[test]
-    fn test_fifo_vs_decay_comparison() {
-        // This test shows why decay is better than FIFO
-        let mut history = BoundedExecutionHistory::with_decay(10, 5 * 60 * 1000);
-        let base_time = 1000000;
-
-        // Scenario: 5 old failures, 5 recent successes
-        for i in 0..5 {
-            history.push(LuaExecutionResult {
-                script_id: "test".to_string(),
-                success: false,
-                output: "fail".to_string(),
-                error: None,
-                execution_time_ms: 100,
-                return_value: None,
-                timestamp_ms: base_time - (20 * 60 * 1000), // Very old
-            });
-        }
-
-        for i in 0..5 {
-            history.push(LuaExecutionResult {
-                script_id: "test".to_string(),
-                success: true,
-                output: "success".to_string(),
-                error: None,
-                execution_time_ms: 100,
-                return_value: None,
-                timestamp_ms: base_time - (1 * 60 * 1000), // Recent
-            });
-        }
-
-        let decayed_rate = history.success_rate_decayed(base_time);
-
-        // FIFO (simple average) = 0.5 (5 successes / 10 total)
-        // Decay = ~0.95+ (recent successes weighted much more)
-
-        assert!(
-            decayed_rate > 0.85,
-            "Exponential decay should prioritize recent data"
+    fn source_size_enforces_exact_boundary_plus_one() {
+        let mut config = test_config();
+        config.max_source_bytes = 4;
+        let root = tempfile::tempdir().expect("root");
+        let exact = root.path().join("exact.lua");
+        fs::write(&exact, "true").expect("source");
+        assert!(LuaScript::new_safe_with_config("exact", &exact, root.path(), &config).is_ok());
+        let plus = root.path().join("plus.lua");
+        fs::write(&plus, "false").expect("source");
+        assert_eq!(
+            LuaScript::new_safe_with_config("plus", &plus, root.path(), &config).unwrap_err(),
+            LuaRegistrationError::SourceTooLarge
         );
-        assert!(decayed_rate != 0.5, "Should NOT be simple FIFO (0.5)");
+    }
+
+    #[test]
+    fn traversal_and_non_lua_paths_are_rejected() {
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_path = outside.path().join("outside.lua");
+        fs::write(&outside_path, "return true").expect("source");
+        assert_eq!(
+            LuaScript::new_safe_with_config("escape", &outside_path, root.path(), &config)
+                .unwrap_err(),
+            LuaRegistrationError::OutsideApprovedRoot
+        );
+        let text = root.path().join("source.txt");
+        fs::write(&text, "return true").expect("source");
+        assert_eq!(
+            LuaScript::new_safe_with_config("text", &text, root.path(), &config).unwrap_err(),
+            LuaRegistrationError::InvalidPath
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_source_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("source.lua");
+        let link = root.path().join("link.lua");
+        fs::write(&source, "return true").expect("source");
+        symlink(&source, &link).expect("symlink");
+        assert_eq!(
+            LuaScript::new_safe_with_config("link", &link, root.path(), &config).unwrap_err(),
+            LuaRegistrationError::SymlinkRejected
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_directory_symlink_component_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let actual = root.path().join("actual");
+        let linked = root.path().join("linked");
+        fs::create_dir(&actual).expect("actual directory");
+        fs::write(actual.join("source.lua"), "return true").expect("source");
+        symlink(&actual, &linked).expect("directory symlink");
+        assert_eq!(
+            LuaScript::new_safe_with_config(
+                "linked-directory",
+                linked.join("source.lua"),
+                root.path(),
+                &config,
+            )
+            .unwrap_err(),
+            LuaRegistrationError::SymlinkRejected
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_symlink_source_is_rejected_when_host_can_create_it() {
+        use std::os::windows::fs::symlink_file;
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let source = root.path().join("source.lua");
+        let link = root.path().join("link.lua");
+        fs::write(&source, "return true").expect("source");
+        if symlink_file(&source, &link).is_ok() {
+            assert_eq!(
+                LuaScript::new_safe_with_config("link", &link, root.path(), &config).unwrap_err(),
+                LuaRegistrationError::SymlinkRejected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_intermediate_directory_symlink_is_rejected_when_host_can_create_it() {
+        use std::os::windows::fs::symlink_dir;
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let actual = root.path().join("actual");
+        let linked = root.path().join("linked");
+        fs::create_dir(&actual).expect("actual directory");
+        fs::write(actual.join("source.lua"), "return true").expect("source");
+        if symlink_dir(&actual, &linked).is_ok() {
+            assert_eq!(
+                LuaScript::new_safe_with_config(
+                    "linked-directory",
+                    linked.join("source.lua"),
+                    root.path(),
+                    &config,
+                )
+                .unwrap_err(),
+                LuaRegistrationError::SymlinkRejected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn text_only_mode_rejects_lua_binary_signature() {
+        let config = test_config();
+        let (_root, script) = fixture_with_config(b"Lua", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        let result = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(result.error(), Some(LuaExecutionError::Syntax));
+    }
+
+    #[tokio::test]
+    async fn disabled_and_pre_cancelled_scripts_fail_before_vm_execution() {
+        let config = test_config();
+        let (_root, script) = fixture("return true");
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        registry.set_enabled(&id, false).expect("disable");
+        let disabled = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("execute");
+        assert_eq!(disabled.error(), Some(LuaExecutionError::ScriptDisabled));
+
+        registry.set_enabled(&id, true).expect("enable");
+        let cancellation = LuaCancellationToken::new();
+        cancellation.cancel();
+        let cancelled = registry
+            .execute_with_cancellation(&id, LuaContext::new("target"), cancellation)
+            .await
+            .expect("execute");
+        assert_eq!(cancelled.error(), Some(LuaExecutionError::Cancelled));
+    }
+
+    #[test]
+    fn execution_without_tokio_runtime_is_typed_and_releases_registry_state() {
+        let config = test_config();
+        let (_root, script) = fixture_with_config(b"return true", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let execution = registry.execute(&id, LuaContext::new("target"));
+        let mut execution = std::pin::pin!(execution);
+        let result = match std::future::Future::poll(execution.as_mut(), &mut context) {
+            Poll::Ready(result) => result.expect("typed execution result"),
+            Poll::Pending => panic!("no-runtime preflight must not suspend"),
+        };
+
+        assert_eq!(result.error(), Some(LuaExecutionError::HostFailure));
+        assert_eq!(registry.get_history(&id).expect("history").len(), 1);
+        registry
+            .unregister(&id)
+            .expect("no invocation lease was retained");
+    }
+
+    #[tokio::test]
+    async fn history_is_entry_and_byte_bounded_and_newest_ordered() {
+        let mut config = test_config();
+        config.history_size = 2;
+        config.max_history_bytes_per_script = 1_024;
+        config.max_history_bytes_total = 1_024;
+        let (_root, script) = fixture_with_config(b"return context.target", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        registry
+            .execute(&id, LuaContext::new("one"))
+            .await
+            .expect("execute");
+        registry.set_enabled(&id, false).expect("disable");
+        registry
+            .execute(&id, LuaContext::new("two"))
+            .await
+            .expect("execute");
+        registry.set_enabled(&id, true).expect("enable");
+        registry
+            .execute(&id, LuaContext::new("three"))
+            .await
+            .expect("execute");
+        let history = registry.get_history(&id).expect("history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].status(), LuaExecutionStatus::Rejected);
+        assert_eq!(history[0].error(), Some(LuaExecutionError::ScriptDisabled));
+        assert_eq!(history[1].status(), LuaExecutionStatus::Completed);
+        let recent = registry.get_recent_history(&id, 1).expect("recent");
+        assert_eq!(recent[0].status(), LuaExecutionStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn history_receipts_never_retain_output_return_or_context() {
+        let config = test_config();
+        let (_root, script) =
+            fixture_with_config(b"emit(context.target); return context.payload", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        let result = registry
+            .execute(
+                &id,
+                LuaContext::new("output-secret").with_payload("return-secret"),
+            )
+            .await
+            .expect("execute");
+        assert_eq!(result.output(), "output-secret");
+        let history = registry.get_history(&id).expect("history");
+        let wire = serde_json::to_string(&history).expect("serialize receipt");
+        assert!(!wire.contains("output-secret"));
+        assert!(!wire.contains("return-secret"));
+        assert_eq!(history[0].source_sha256(), result.source_sha256());
+        assert_eq!(history[0].script_version(), result.script_version());
+    }
+
+    #[tokio::test]
+    async fn global_history_byte_cap_evicts_the_stable_oldest_receipt() {
+        let mut config = test_config();
+        config.max_history_bytes_per_script = 512;
+        config.max_history_bytes_total = 512;
+        let root = tempfile::tempdir().expect("root");
+        let first_path = root.path().join("first.lua");
+        let second_path = root.path().join("second.lua");
+        fs::write(&first_path, "return true").expect("first source");
+        fs::write(&second_path, "return false").expect("second source");
+        let first = LuaScript::new_safe_with_config("first", &first_path, root.path(), &config)
+            .expect("first");
+        let second = LuaScript::new_safe_with_config("second", &second_path, root.path(), &config)
+            .expect("second");
+        let first_id = first.id();
+        let second_id = second.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(first).expect("first registration");
+        registry.register(second).expect("second registration");
+
+        registry
+            .execute(&first_id, LuaContext::new("first"))
+            .await
+            .expect("first execution");
+        registry
+            .execute(&second_id, LuaContext::new("second"))
+            .await
+            .expect("second execution");
+
+        assert!(registry
+            .get_history(&first_id)
+            .expect("first history")
+            .is_empty());
+        assert_eq!(
+            registry
+                .get_history(&second_id)
+                .expect("second history")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_affects_new_calls_and_unregister_rejects_active_invocation() {
+        let mut config = test_config();
+        config.default_timeout_ms = 5_000;
+        config.instruction_limit = 100_000_000;
+        config.hook_interval = 100;
+        let (_root, script) = fixture_with_config(b"while true do end", &config);
+        let retained = script.clone();
+        let id = script.id();
+        let registry = Arc::new(LuaScriptRegistry::from_config(&config).expect("registry"));
+        registry.register(script).expect("register");
+        let cancellation = LuaCancellationToken::new();
+        let worker_registry = Arc::clone(&registry);
+        let worker_id = id.clone();
+        let worker_cancellation = cancellation.clone();
+        let worker = tokio::spawn(async move {
+            worker_registry
+                .execute_with_cancellation(
+                    &worker_id,
+                    LuaContext::new("target"),
+                    worker_cancellation,
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(registry.unregister(&id), Err(LuaRegistryError::ScriptInUse));
+        registry.set_enabled(&id, false).expect("disable");
+        let rejected = registry
+            .execute(&id, LuaContext::new("target"))
+            .await
+            .expect("new invocation");
+        assert_eq!(rejected.error(), Some(LuaExecutionError::ScriptDisabled));
+        cancellation.cancel();
+        let active = worker.await.expect("worker").expect("active invocation");
+        assert_eq!(active.error(), Some(LuaExecutionError::Cancelled));
+        registry.unregister(&id).expect("unregister after finish");
+        registry
+            .register(retained)
+            .expect("same stable identity may register again");
+        assert_eq!(registry.count(), Ok(1));
+    }
+
+    #[test]
+    fn public_script_clones_cannot_mutate_registered_enabled_state() {
+        let (_root, script) = fixture("return true");
+        let disabled_clone = script.clone().with_enabled(false);
+        assert!(script.manifest().enabled());
+        assert!(!disabled_clone.manifest().enabled());
+        let registry = LuaScriptRegistry::from_config(&test_config()).expect("registry");
+        registry.register(script).expect("register");
+        assert_eq!(registry.enabled_count(), Ok(1));
+        let _ = disabled_clone.with_enabled(true);
+        assert_eq!(registry.enabled_count(), Ok(1));
+    }
+
+    #[test]
+    fn total_source_byte_capacity_is_accounted_and_released() {
+        let mut config = test_config();
+        config.max_source_bytes = 4;
+        config.max_total_source_bytes = 6;
+        let root = tempfile::tempdir().expect("root");
+        let first_path = root.path().join("first.lua");
+        let second_path = root.path().join("second.lua");
+        fs::write(&first_path, "a=1\n").expect("source");
+        fs::write(&second_path, "b=2\n").expect("source");
+        let first = LuaScript::new_safe_with_config("first", &first_path, root.path(), &config)
+            .expect("first");
+        let second = LuaScript::new_safe_with_config("second", &second_path, root.path(), &config)
+            .expect("second");
+        let first_id = first.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(first).expect("register");
+        assert_eq!(
+            registry.register(second.clone()),
+            Err(LuaRegistryError::TotalSourceCapacity)
+        );
+        registry.unregister(&first_id).expect("unregister");
+        registry.register(second).expect("capacity released");
+    }
+
+    #[tokio::test]
+    async fn checked_history_sequence_overflow_does_not_mutate_history() {
+        let config = test_config();
+        let (_root, script) = fixture_with_config(b"return true", &config);
+        let id = script.id();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        registry
+            .execute(&id, LuaContext::new("first"))
+            .await
+            .expect("first");
+        let before = registry.get_history(&id).expect("history");
+        registry.state.lock().expect("state").next_sequence = u64::MAX;
+        assert!(matches!(
+            registry.execute(&id, LuaContext::new("second")).await,
+            Err(LuaRegistryError::HistorySequenceExhausted)
+        ));
+        let after = registry.get_history(&id).expect("history");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn terminal_control_precedence_is_sticky_then_cancel_then_deadline() {
+        assert_eq!(
+            terminal_control_error(Some(StickyAbort::Output), true, true),
+            Some(LuaExecutionError::OutputLimit)
+        );
+        assert_eq!(
+            terminal_control_error(None, true, true),
+            Some(LuaExecutionError::Cancelled)
+        );
+        assert_eq!(
+            terminal_control_error(None, false, true),
+            Some(LuaExecutionError::DeadlineExceeded)
+        );
+        assert_eq!(terminal_control_error(None, false, false), None);
+    }
+
+    #[test]
+    fn hook_controls_deadline_is_sticky_without_charging_instructions() {
+        let sticky_abort = Cell::new(None);
+        let instruction_count = Cell::new(41);
+
+        let error = enforce_hook_controls(&sticky_abort, &instruction_count, false, true, 10, 100)
+            .expect_err("deadline must interrupt the hook");
+
+        assert!(matches!(
+            error,
+            MluaError::RuntimeError(message) if message == ABORT_DEADLINE
+        ));
+        assert_eq!(sticky_abort.get(), Some(StickyAbort::Deadline));
+        assert_eq!(instruction_count.get(), 41);
+        assert_eq!(
+            terminal_control_error(sticky_abort.get(), false, false),
+            Some(LuaExecutionError::DeadlineExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_vm_prevents_cross_run_global_state() {
+        let first = run("state = 1; return state", LuaContext::new("target")).await;
+        assert_eq!(first.error(), Some(LuaExecutionError::Runtime));
+        let second = run("return state == nil", LuaContext::new("target")).await;
+        assert_eq!(second.return_value(), Some(&LuaReturnValue::Boolean(true)));
+    }
+
+    #[test]
+    fn manifests_are_inert_sorted_and_hide_source_path() {
+        let config = test_config();
+        let root = tempfile::tempdir().expect("root");
+        let first_path = root.path().join("first.lua");
+        let second_path = root.path().join("second.lua");
+        fs::write(&first_path, "return true").expect("source");
+        fs::write(&second_path, "return false").expect("source");
+        let first = LuaScript::new_safe_with_config("zeta", &first_path, root.path(), &config)
+            .expect("one");
+        let second = LuaScript::new_safe_with_config("alpha", &second_path, root.path(), &config)
+            .expect("two");
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(first).expect("register");
+        registry.register(second).expect("register");
+        let manifests = registry.list_all().expect("manifests");
+        assert_eq!(manifests[0].name(), "alpha");
+        let serialized = serde_json::to_string(&manifests).expect("serialize manifests");
+        assert!(!serialized.contains(root.path().to_string_lossy().as_ref()));
+        assert!(!serialized.contains("return true"));
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_identity_name_and_capacity() {
+        let mut config = test_config();
+        config.max_scripts = 2;
+        let (root, script) = fixture_with_config(b"return true", &config);
+        let duplicate = script.clone();
+        let registry = LuaScriptRegistry::from_config(&config).expect("registry");
+        registry.register(script).expect("register");
+        assert_eq!(
+            registry.register(duplicate),
+            Err(LuaRegistryError::DuplicateId)
+        );
+
+        let same_name_path = root.path().join("same-name.lua");
+        fs::write(&same_name_path, "return false").expect("source");
+        let same_name =
+            LuaScript::new_safe_with_config("fixture", &same_name_path, root.path(), &config)
+                .expect("same name");
+        assert_eq!(
+            registry.register(same_name),
+            Err(LuaRegistryError::DuplicateName)
+        );
+
+        let second_path = root.path().join("second.lua");
+        let third_path = root.path().join("third.lua");
+        fs::write(&second_path, "return 2").expect("source");
+        fs::write(&third_path, "return 3").expect("source");
+        let second = LuaScript::new_safe_with_config("second", &second_path, root.path(), &config)
+            .expect("second");
+        let third = LuaScript::new_safe_with_config("third", &third_path, root.path(), &config)
+            .expect("third");
+        registry.register(second).expect("second registration");
+        assert_eq!(
+            registry.register(third),
+            Err(LuaRegistryError::ScriptCapacity)
+        );
     }
 }

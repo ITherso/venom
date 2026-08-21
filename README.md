@@ -9,13 +9,13 @@
 Venom is an experimental Rust security-testing project centered on a deterministic decision runtime that turns bounded web observations into typed evidence, hypotheses, risk-aware plans, and verifier-scoped outcomes.
 
 > [!WARNING]
-> **Venom v0.9.0-alpha is not production-ready.** Use it only on systems you own or are explicitly authorized to test. `decision-scan` is bounded, but it still makes network requests; the legacy `scan` path performs direct I/O outside `RuntimeBudget`. Preview and Experimental contracts may change.
+> **This remediated `0.10.0-alpha.1` source state is unreleased and not production-ready.** The historical `v0.9.0-alpha` binaries predate the bounded default runtime documented here and are not an installation path for this behavior. Build a reviewed, pinned commit from source and use it only on systems you own or are explicitly authorized to test. The default `scan` command is bounded, but it still makes network requests. The separately compiled `legacy-scan` has distinct bounded discovery and verification authorities, but phase one and custom extensions can still perform direct I/O outside `RuntimeBudget`, so its whole-run accounting is `Unmetered`. Preview and Experimental contracts may change.
 
 **Why an action ran is not what it proved.** Venom keeps the evidence that motivates an action separate from the evidence that may change a hypothesis. An action can return `Success` after completing a knowledge-gathering objective without confirming its motivating hypothesis.
 
 ```mermaid
 flowchart LR
-    Host["Authorized host"] --> Preview["decision-scan · Preview"]
+    Host["Authorized host"] --> Preview["scan · Preview"]
     Preview --> Observe["Bounded observe"]
     Observe --> Evidence["Typed evidence"]
     Evidence --> Reason["Reason"]
@@ -25,12 +25,17 @@ flowchart LR
     Verify --> Outcome["Outcome"]
     Outcome -. "bounded continuation" .-> Reason
 
-    Host --> Legacy["scan · legacy alpha"]
+    Host --> Legacy["legacy-scan · opt-in legacy alpha"]
     Legacy --> Phases["Ordered phases"]
-    Phases --> Findings["Legacy findings / reporting"]
+    Phases --> Passive["Passive discovery · phases 2–4"]
+    Phases --> Active["Active verification · phases 5–9"]
+    Phases --> Raw["Raw compatibility I/O · phase 1 / custom"]
+    Passive --> LegacyRecords["Informational observations · Unknown"]
+    Active --> Review["Unknown / verifier-scoped NeedsReview / no outcome"]
+    Raw --> LegacyRecords
 ```
 
-The two paths are separate. The deterministic runtime currently emits operational decisions and outcomes, not Surface-B findings. Scanner SDK and plugin APIs are optional library surfaces; they are not silently inserted into `decision-scan`.
+The two paths are separate. The deterministic runtime currently emits operational decisions and outcomes, not Surface-B findings. `decision-scan` is a deprecated command alias for the same deterministic path; it is not a second engine. Scanner SDK and plugin APIs are optional library surfaces and are not silently inserted into `scan`.
 
 ## Why Venom is different
 
@@ -78,7 +83,11 @@ Requirements: Rust 1.88 or newer, Git, and an authorized reachable HTTP(S) origi
 ```bash
 git clone https://github.com/ITherso/venom.git
 cd venom
-cargo run -p venom-cli --locked -- decision-scan https://authorized.example.test
+REVIEWED_COMMIT="REPLACE_WITH_THE_REVIEWED_FULL_COMMIT_SHA"
+test "$REVIEWED_COMMIT" != "REPLACE_WITH_THE_REVIEWED_FULL_COMMIT_SHA"
+git checkout --detach "$REVIEWED_COMMIT"
+test "$(git rev-parse HEAD)" = "$REVIEWED_COMMIT"
+cargo run -p venom-cli --locked -- scan https://authorized.example.test
 ```
 
 `example.test` is a reserved placeholder. Replace it with an origin you own or are explicitly permitted to assess.
@@ -86,23 +95,54 @@ cargo run -p venom-cli --locked -- decision-scan https://authorized.example.test
 Inspect the decision chain or consume structured diagnostics:
 
 ```bash
-cargo run -p venom-cli --locked -- decision-scan https://authorized.example.test --explain
-cargo run -p venom-cli --locked -- decision-scan https://authorized.example.test --format json
+cargo run -p venom-cli --locked -- scan https://authorized.example.test --explain
+cargo run -p venom-cli --locked -- scan https://authorized.example.test --format json
 ```
 
-`--explain` expands the text report. JSON already contains the full diagnostics and uses the documented [`decision-scan/v1`](docs/internals/decision-scan-json-v1.md) schema, so the two flags cannot be combined.
+`--explain` expands the text report. JSON already contains the full diagnostics and uses the documented, historically named [`decision-scan/v1`](docs/internals/decision-scan-json-v1.md) schema, so the two flags cannot be combined. The deprecated, discoverable `decision-scan` compatibility alias accepts the same options and produces identical stdout and stderr.
 
 The Preview profile enforces fixed request, wall-time, response-byte, request-body, active-verification, same-action, and no-progress limits. Redirects are disabled and every built-in request competes for the same runtime budget.
 
 ### Legacy ordered scanner
 
-The maintained migration path is still available:
+The historical ordered runner is absent from default builds. It can be compiled explicitly and requires acknowledgement at invocation:
 
 ```bash
-cargo run -p venom-cli --locked -- scan https://authorized.example.test
+cargo run -p venom-cli --locked --features legacy-scanner -- legacy-scan \
+  https://authorized.example.test --acknowledge-legacy-heuristics
 ```
 
-`venom scan` runs the legacy ordered phase pipeline and legacy finding/reporting path. It does not use `StandardWebDecisionRuntime` or `RuntimeBudget`. Wordlist-based directory brute forcing is disabled by default and requires the explicit `--legacy-directory-fuzz` option.
+`legacy-scan` runs the historical heuristic phase pipeline. Its crawler,
+wordlist-based directory discovery, and parameter discovery share a passive,
+exact-origin, redirect-disabled broker with finite depth, page, request,
+request-timeout, wall-time, cumulative-body, and per-response-body limits.
+Directory discovery remains separately disabled unless
+`--legacy-directory-fuzz` is supplied. These phases commit typed discovery state
+atomically and produce only informational observations: directory candidates
+must differ from two stable randomized nonexistent-path controls in the same
+parent namespace and path shape, while parameters must
+pass a reproducible baseline/control/candidate/replay comparison.
+
+Phases five through nine use a second exact-origin, redirect- and
+retry-disabled authority accounted at the `Active` stage. `VerificationLimits`
+bounds its requests, per-request timeout, shared wall time, cumulative delivered
+body bytes, and retained bytes per response. SQL behavior and template
+arithmetic differentials—and an SDK host's explicitly configured benign local-file
+canary—can produce verifier-owned, knowledge-only `NeedsReview` outcomes. Exact
+reflection remains an `Unknown` observation because no browser-execution
+verifier exists. XXE is inert; SSRF is inert by default, and an SDK host's
+explicit OOB delivery records only a nonce-bearing probe receipt. The current
+legacy contract has no callback verifier and produces no SSRF outcome. No
+cloud-metadata or sensitive-file probe is compiled as a default.
+
+That scoped boundary does not make the historical runner a bounded decision
+runtime. Phase one and custom `ScanPhase` extensions can retain direct I/O
+outside `StandardWebDecisionRuntime` and both bounded authorities, so the
+complete run remains `Unmetered`. CLI output deliberately withholds unverified
+phase detail; raw compatibility records project as `Unknown`, while only the
+allowlisted verifier bridge can project the `NeedsReview` outcomes above. See
+[ADR 0016](docs/adr/0016-bound-legacy-discovery-authority.md) and
+[ADR 0018](docs/adr/0018-bound-legacy-verification-authority.md).
 
 See the [runtime map](docs/internals/runtime-map.md) for the exact module and command inventory.
 
@@ -114,19 +154,36 @@ See the [runtime map](docs/internals/runtime-map.md) for the exact module and co
 - A same-origin route is not authorization to request it; the host remains the authority boundary.
 - Missing evidence in a bounded or truncated sample is not evidence of absence.
 - Successful execution is not automatically confirmation, a finding, or a vulnerability claim.
+- A repeated SQL timing differential, exact text reflection, or template-arithmetic result still requires claim-specific review; none is an exploit or vulnerability verdict.
+- Delivering an OOB callback URL to the target is not evidence that the target made the callback. HTTP 200, 401, or 403 is only the probe response.
 - JSON/GraphQL fingerprints and paired visibility differences remain observations or review hypotheses unless a dedicated verifier says otherwise.
 
 ## Runtime surfaces
 
 | Surface | Status | Current boundary |
 | --- | --- | --- |
-| `venom decision-scan` | Preview | Bounded deterministic web decision runtime with text, explain, and JSON diagnostics |
-| `venom scan` | Legacy alpha | Ordered phases and legacy findings, using direct I/O outside the deterministic runtime budget |
-| Scanner SDK / native plugins | Preview | Source-level host extension APIs with generated starters; not merged into `decision-scan` |
-| `venom api` | Unsupported | The library exposes a health router, but the CLI adapter does not bind a listener |
-| `venom proxy` | Experimental | Fixed-upstream TCP relay; no `CONNECT`, TLS termination, certificate generation, or HTTP inspection |
+| `venom scan` | Preview | Default bounded deterministic web decision runtime with text, explain, and JSON diagnostics |
+| `venom decision-scan` | Deprecated alias | Compatibility name for the same deterministic command and engine; the wire schema remains `decision-scan/v1` |
+| `venom legacy-scan` | Legacy alpha, opt-in | Historical mixed-authority pipeline: phases 2–4 share bounded passive discovery, phases 5–9 share separate bounded active verification, and phase-one/custom raw I/O keeps the whole run `Unmetered`; requires `legacy-scanner` and explicit acknowledgement |
+| Scanner SDK / native plugins | Preview, opt-in | Source-level host extensions; plugins receive a host-owned bounded context and record observations, not findings. No stock detector plugins ship, and plugins are not merged into the default runtime |
+| Run-report renderer | Preview, opt-in | Source-level `reporting` library API renders an existing typed `RunReport` under a hard output ceiling; the host must pre-redact projected fields, and the renderer has no repository CLI caller, I/O, persistence, finding/risk synthesis, redaction, or verdict authority |
+| Lua execution | Experimental, opt-in | Implemented bounded, cooperative in-process Lua 5.4 registry/executor for explicit library hosts; no standard libraries, process isolation, plugin bridge, scanner phase, or repository CLI caller |
+| Distributed coordination | Experimental, opt-in | Implemented deterministic, bounded in-process task/worker/result state machines for explicit library hosts; no transport, authentication, serialization, persistence, ambient clock, background work, or multi-node control plane |
+| `venom api` | Unsupported, opt-in | Absent from default builds; the `api-adapter` feature reports that no listener is implemented |
+| `venom proxy` | Experimental, opt-in | Absent from default builds; `proxy-adapter` exposes an explicit fixed-upstream TCP relay with no `CONNECT`, TLS termination, certificate generation, or HTTP inspection |
 
-Dashboard, distributed, monitoring, compliance, threat-intelligence, Lua, and related modules are optional, host-owned, compile-only, or experimental depending on the feature. Their presence in the repository does not mean they run in either scan command. The [runtime map](docs/internals/runtime-map.md) is the source of truth.
+Lua and distributed coordination are implemented Experimental host-library
+surfaces, but no repository runtime calls them. Dashboard, monitoring,
+compliance, threat-intelligence, and related modules remain optional,
+host-owned, compile-only, or experimental depending on the feature. None runs
+in the default deterministic path or `legacy-scan`. The [runtime
+map](docs/internals/runtime-map.md) is the source of truth.
+
+The scanner default is exactly `core` plus `scanning`. Historical phases,
+platform data models, bounded run-report renderers, native plugins, Lua, and distributed
+workers require the independent `legacy-scanner`, `platform-models`,
+`reporting`, `plugins`, `lua`, and `distributed` features. The CLI's unsupported
+API hook and experimental relay require `api-adapter` and `proxy-adapter`.
 
 ## Quality and robustness
 
@@ -134,7 +191,7 @@ Dashboard, distributed, monitoring, compliance, threat-intelligence, Lua, and re
 | --- | --- | --- |
 | Tests | Unit, integration, doc, security, template, and architecture jobs in [CI](.github/workflows/tests.yml) | Passing CI is not production readiness |
 | Rust compatibility | MSRV 1.88 plus stable, beta, and nightly | Pre-stable APIs may still change |
-| Coverage | Tarpaulin output uploaded to [Codecov](https://codecov.io/gh/ITherso/venom) | No minimum percentage is claimed |
+| Coverage | Pinned Tarpaulin's LLVM backend enforces the accepted [21,439/24,842 observed source-line baseline](docs/reports/coverage/6edc4d925739.md) plus the same exact ratio on coverable changed lines; `venom.coverage.v2` evidence binds a normalized line-state digest | Coverage is a scoped navigation signal, not proof of test adequacy; the advisory [Codecov](https://codecov.io/gh/ITherso/venom) upload is best-effort and tokenless availability is not enforced |
 | Safe Rust / boundaries | Workspace crates forbid unsafe code; architecture checks enforce dependency and transport ownership | Static boundaries do not prove semantic correctness |
 | Public API compatibility | Blocking SemVer comparison for `venom-core` | Scanner, CLI, API, and proxy are outside that baseline |
 | Security scanning | RustSec, cargo-deny, Semgrep CE, Trivy, Dependabot, and scoped CodeQL | Automated scanners have false positives and false negatives |
@@ -147,13 +204,13 @@ See [Fuzzing](docs/fuzzing.md), [Quality metrics](docs/quality-metrics.md), [Rep
 
 ## Project status
 
-The latest release is **v0.9.0-alpha** and `main` targets the next Preview release. Alpha means public contracts, output details, and integration boundaries may change. Lifecycle labels describe maturity, not completeness:
+The latest published tag, **v0.9.0-alpha**, is historical and predates this source contract; `main` targets the next Preview release. Build from a reviewed, pinned source commit until a remediated tag exists. Alpha means public contracts, output details, and integration boundaries may change. Lifecycle labels describe maturity, not completeness:
 
 - [Feature lifecycle](FEATURES.md)
 - [Stable-release gates and active blockers](PROJECT_STATUS.md)
 - [Changelog](CHANGELOG.md)
 
-The current release has no independent security audit, stable scanner/plugin ABI, endpoint-scale performance report, supported API service, supported MITM proxy, or deployable distributed control plane.
+The current source state has no independent security audit, stable scanner/plugin ABI, endpoint-scale performance report, supported API service, supported MITM proxy, or deployable distributed control plane.
 
 ## Repository layout
 
@@ -172,7 +229,7 @@ The root `Cargo.toml` is a virtual workspace manifest. Runtime ownership and fea
 
 ## Scanner SDK and plugins
 
-Both generated starters compile in CI, but their source-level contracts remain Preview:
+Both generated starters compile in CI, but their source-level contracts remain Preview. The plugin starter is an INFO-only trait-boundary fixture: Venom ships no stock detector plugins, and plugin observations still require host reasoning and verification before any finding projection.
 
 ```bash
 cargo install cargo-generate
@@ -188,6 +245,8 @@ See the [Scanner SDK guide](docs/sdk.md), [Plugin development](docs/plugin.md), 
 - [Distribution and installation](docs/DISTRIBUTION.md)
 - [Architecture](docs/architecture.md)
 - [Runtime map: what actually runs](docs/internals/runtime-map.md)
+- [Lua execution](docs/lua.md)
+- [Distributed coordination](docs/distributed.md)
 - [Decision runner](docs/internals/decision-runner.md)
 - [Web execution](docs/internals/web-execution.md)
 - [Web verification](docs/internals/web-verification.md)

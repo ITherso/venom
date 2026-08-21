@@ -16,7 +16,7 @@ source of truth.
 | Template smoke tests | `templates/` in CI | Generated scanner and plugin projects compile independently |
 | Benchmarks | `crates/venom-scanner/benches/` | Criterion regression signals |
 | Fuzz targets | `fuzz/` | Bounded parser campaigns outside the main workspace |
-| Dashboard tests | `web/` | Frontend unit, build, and separately configured browser checks |
+| Dashboard tests | `web/` | Server-render smoke, typecheck, lint, and production-build checks; no browser interaction or accessibility suite is currently configured |
 
 ## Local commands
 
@@ -38,7 +38,7 @@ Focus on one package or one test name while iterating:
 ```bash
 cargo test -p venom-core
 cargo test -p venom-scanner --all-features runtime_budget
-cargo test -p venom-scanner --test integration_tests
+cargo test --locked -p venom-scanner --no-default-features --features legacy-scanner --test integration_tests
 ```
 
 Public examples must compile as documentation tests where applicable:
@@ -54,15 +54,14 @@ the architecture gate, and a release CLI build:
 cargo xtask release
 ```
 
-## Service-backed tests
+## Integration tests
 
-The GitHub integration-test job starts PostgreSQL 15 and Redis 7, then runs the
-all-feature integration suite with explicit local connection strings. To
-reproduce that job, start disposable local services and set:
+The GitHub integration-test job runs the all-feature suite without PostgreSQL or
+Redis. The current tests use in-memory state and loopback fixtures; provisioning
+unused services would imply a runtime dependency that does not exist. Reproduce
+the job with:
 
 ```bash
-export DATABASE_URL=postgres://test:test@localhost:5432/venom_test
-export REDIS_URL=redis://localhost:6379
 cargo test --workspace --all-features --tests --locked
 ```
 
@@ -146,9 +145,58 @@ plus HTTP, JSON, YAML, XML, and text dependency-parser campaigns. See
 
 ## Coverage and performance
 
-The Tests workflow uploads Rust coverage to Codecov. Coverage is a navigation
-signal, not proof of correctness; new behavior still needs assertions for
-failure paths and boundary conditions.
+The Tests workflow builds `cargo-tarpaulin 0.37.2` with pinned installer Rust
+`1.91.0`, then explicitly measures with the project's Rust `1.88.0`, its
+`llvm-tools-preview` component, and Tarpaulin's LLVM backend. The fixed
+scope is tracked Rust files under `crates/*/src/**` and `xtask/src/**` with the
+all-feature workspace build. It uploads Cobertura plus deterministic JSON and
+Markdown summaries as the `coverage-evidence` artifact. It also attempts a
+best-effort advisory Codecov upload, but tokenless availability is not required
+or enforced. The policy checker's own standard-library regression tests run
+before measurement.
+
+The checker enforces the accepted LLVM baseline of exactly 21,439 covered of
+24,842 observed coverable source lines. Aggregate coverage and coverable changed
+lines on pull requests and branch pushes must each meet that integer ratio.
+Every changed in-scope file has a patch row. The accepted record preserves the
+exact reviewed nine-path omission inventory from
+[Coverage evidence](reports/coverage/README.md); its zeroes describe
+instrumentation output, not the absence of executable source. An accepted
+omission is excluded from the patch denominator only while its path and source
+blob remain frozen to the applicable
+floor record; changed content must become measured. A new omission fails closed,
+as does disappearance from Cobertura of a source measured in that baseline and
+still present at HEAD. A missing/null event base fails closed; a patch with zero
+observed coverable changed lines is N/A. Exact integer counts are authoritative;
+rounded percentages are display-only. Evidence schema `venom.coverage.v2` also
+binds the normalized boolean state of every observed source line. First and
+replacement baseline records must match the current aggregate, per-file,
+line-state digest, and omission measurement exactly.
+Actual Rust `tarpaulin` and `tarpaulin_*` cfg tokens,
+`coverage(off)`, and legacy `no_coverage` attributes are forbidden in the
+tracked production-source scope so instrumentation-specific conditionals cannot
+turn changed code into an N/A patch; comments and string literals that merely
+describe them are ignored. `--ignore-config`, an exact workflow-level env, the
+reviewed alias-only Cargo config, and the custom-build ban close
+repository-controlled instrumentation overrides.
+
+A first or replacement baseline must come from a dedicated follow-up to its
+recorded source commit. Outside coverage truth docs and the exact first-time
+workflow flip, tracked source, manifests, lockfile, checker, fixtures, and build
+inputs must remain unchanged. Baseline acceptance must preserve the evidence
+source commit through a merge commit or fast-forward; squash/rebase history must
+regenerate evidence for the rewritten commit.
+
+Run the checker tests with:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_coverage_gate.py'
+```
+
+See [Coverage evidence](reports/coverage/README.md) for the command, schema,
+provenance requirements, accepted record, and replacement sequence. Coverage is
+a navigation signal, not proof of correctness; new behavior
+still needs assertions for failure paths and boundary conditions.
 
 Criterion output, compile time, binary size, and peak runner memory are
 published as workflow artifacts. See [Quality metrics](quality-metrics.md) and

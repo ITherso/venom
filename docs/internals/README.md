@@ -13,7 +13,13 @@ ScanRunner -----> EventBus
     v
 ScanPhase
 
-Plugin host ----> PluginRegistry ----> Plugin::execute
+Plugin host ----> host-created request ----> PluginRegistry
+                                               |
+                                               v
+                                  invocation PluginContext ----> Plugin::execute
+                                      |                           |
+                                      v                           v
+                               bounded broker             evidence recorder
 
 DecisionLoop ---> DecisionRunnerAdapter ---> DecisionActionExecutor
                          |
@@ -60,10 +66,16 @@ Authorized JSON pair --> ApiVisibilityComparator --> comparison observation
                                                         v
                                            resource review projection
 
-Task producer --> TaskQueue --> WorkerPool --> WorkerNode
+Explicit host --> TaskQueue <--> WorkerPool --> WorkerNode
+      |              |
+      |              `--> CompletionReceipt --> ResultAggregator
+      `--> LuaScriptRegistry --> fresh bounded Lua VM
 ```
 
-- [Scheduler](scheduler.md): queue, worker scoring, assignment, retry, and heartbeat boundaries.
+- [Scheduler](scheduler.md): explicit-time revisioned queue/worker assignment,
+  logical ownership, retry/recovery, and bounded result-retention boundaries.
+- [Lua execution](../lua.md): approved-root source snapshots, private VM host
+  API, cooperative budgets/cancellation, and receipt/provenance limits.
 - [Event bus](event-bus.md): synchronous publication, subscriptions, history, and correlation.
 - [Runner](runner.md): ordered phase execution, timeouts, cancellation, and partial results.
 - [Decision runner](decision-runner.md): command execution, executor routing, evidence provenance, and verifier handoff.
@@ -79,7 +91,7 @@ Task producer --> TaskQueue --> WorkerPool --> WorkerNode
 - [Payload strategies](payload-strategies.md): planner-selected revisions, deterministic derivation contract, redaction, and transport requirements.
 - [Web execution](web-execution.md): semantic executor installation, discovery-only HTTP methods, and scope controls.
 - [Web verification](web-verification.md): action/case isolation, passive/active rules, and conservative outcomes.
-- [Plugin registry](plugin-registry.md): validation, compatibility, lookup, execution, and accounting.
+- [Plugin registry](plugin-registry.md): host-owned scope, request/evidence budgets, redaction, validation, execution, and accounting.
 - [Semantic producer contract](semantic-producer-contract.md): production evidence vocabulary compatibility for semantic entity extraction and explicit deferred gaps.
 
 Cross-boundary changes should start in [Architecture Decisions](../adr/README.md). Public contract changes must also follow the [Plugin API policy](../plugin-api-policy.md).

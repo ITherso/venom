@@ -55,34 +55,6 @@ impl ReconPhase {
     pub fn new() -> Self {
         Self
     }
-
-    /// List of known vulnerable server versions with their CVE information
-    #[allow(dead_code)]
-    fn vulnerable_versions() -> Vec<(&'static str, &'static str, &'static str)> {
-        vec![
-            (
-                "Apache/2.4.49",
-                "CVE-2021-41773",
-                "Path Traversal via URL path",
-            ),
-            (
-                "Apache/2.4.50",
-                "CVE-2021-41773",
-                "Path Traversal via URL path",
-            ),
-        ]
-    }
-
-    /// Analyzes server header for version information
-    #[allow(dead_code)]
-    fn analyze_server_header(header: &str) -> Option<(&'static str, &'static str)> {
-        for (version, cve, description) in Self::vulnerable_versions() {
-            if header.contains(version) {
-                return Some((cve, description));
-            }
-        }
-        None
-    }
 }
 
 impl Default for ReconPhase {
@@ -110,13 +82,13 @@ impl ScanPhase for ReconPhase {
     /// 4. Generates findings for exposed technologies
     ///
     /// # Returns
-    /// Vector of ScanFinding containing identified vulnerabilities
+    /// Compatibility observations recorded during phase-one reconnaissance.
     async fn execute(&self, ctx: &ScanContext) -> Result<Vec<ScanFinding>, ScannerError> {
         ctx.log("Phase 1: Passive reconnaissance initiated...".to_string());
         let mut findings = Vec::new();
 
         // Passive recon: HEAD request to check server headers
-        let target_str = ctx.target.to_string();
+        let target_str = ctx.authorized_target().to_string();
         match ctx.client.head(&target_str).send().await {
             Ok(response) => {
                 ctx.log(format!(

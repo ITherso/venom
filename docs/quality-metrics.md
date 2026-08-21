@@ -17,7 +17,38 @@ The `Quality Metrics` workflow records:
 
 Results are runner-local regression signals. They are not comparable across arbitrary hardware and are not endpoint-capacity claims.
 
-Coverage is produced by the Tests workflow and uploaded to Codecov. Unit, integration, compatibility, and security results remain separate required checks.
+Coverage is produced by the Tests workflow with measurement Rust `1.88.0`, its
+`llvm-tools-preview` component, and the explicit LLVM backend of
+`cargo-tarpaulin 0.37.2`, compiled by pinned installer Rust `1.91.0`. The
+workflow uploads Cobertura plus deterministic JSON and Markdown summaries as a
+retained artifact. Evidence schema `venom.coverage.v2` records a normalized
+line-state digest in addition to aggregate and per-file counts, so a same-count
+covered-line swap cannot pass the baseline-acceptance seal. It attempts a
+best-effort advisory Codecov upload, but tokenless availability is not required
+or enforced.
+The fixed scope is tracked Rust files under `crates/*/src/**` plus `xtask/src/**`;
+Tarpaulin is instructed to ignore test functions with `--ignore-tests`.
+Unit, integration, compatibility, and security results remain separate checks.
+
+The accepted [LLVM coverage record](reports/coverage/6edc4d925739.md) establishes
+an exact aggregate and changed-line floor of 21,439/24,842 observed coverable
+source lines. The repository checker validates safe paths, integer counts,
+report structure, and base-to-head diff structure, and it emits an explicit
+patch row for every changed in-scope file. The accepted omission inventory is
+the reviewed nine-path list. An omission is excluded from the patch denominator
+only while its path and source blob remain frozen to the applicable floor
+record; changed content
+must become measured. New omissions fail closed, as does disappearance from
+Cobertura of a source measured in the applicable accepted baseline and still
+present at HEAD. The checker also rejects production-source
+`tarpaulin`/`tarpaulin_*` cfg,
+`coverage(off)`, and legacy `no_coverage` instrumentation exclusions. The exact
+command ignores Tarpaulin config and fixes the LLVM backend, while architecture
+pins workflow env and Cargo config and forbids custom build targets. It emits
+the evidence needed to review a replacement baseline. Calibration cannot run
+while the accepted pointer exists. See
+[Coverage evidence](reports/coverage/README.md) for the accepted record,
+replacement procedure, and exact floor and patch policy.
 
 `scripts/generate-metrics.sh` derives package roots from locked Cargo metadata,
 then reports only Rust files that Git identifies as tracked below those roots.

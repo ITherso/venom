@@ -6,6 +6,10 @@ All notable changes to Venom are recorded here. Releases use the categories from
 
 ### Added
 
+- Experimental opt-in host-library execution surfaces for bounded Lua 5.4
+  source snapshots and deterministic process-local task/worker/result
+  coordination. Neither surface has a repository CLI, scanner, plugin, or
+  default-runtime caller.
 - A security-hardened Phase 1 `semantic` entity extraction layer (`EntityExtractor`, `SemanticEntity`, `SemanticEntityType`, `AuthArtifactKind`). Converts raw scanner `Evidence` into strongly-typed, canonical semantic entities without mutating planner state or forcing intrinsic Plane properties onto entities. Includes strict redaction guarantees for sensitive header values (`[REDACTED]`) and auth credentials (SHA-256 fingerprinting with domain separation `venom:auth-artifact:v1:<kind>:<raw>`), `Domain` vs `IpAddress` separation, `v1` canonical entity identifiers, and order-independent `BTreeSet` attribute merging.
 
 - A deterministic, public-API demonstration test (`defense_aware_planning_demo`) that shows the defense-aware planning arc end to end for one fixed scenario: the enforcement-off plan, the side-effect-free shadow delta with supporting evidence and stable explanation codes, and the enforcement-on plan with distinct `DefenseSuppressed` exclusions. It asserts the guarantees — disabled leaves the plan untouched, shadow and enforcement agree on what to suppress, and a suppressed action never becomes a plan step so it never reaches an executor — and renders a readable side-by-side summary.
@@ -47,14 +51,13 @@ All notable changes to Venom are recorded here. Releases use the categories from
 - Host-owned standard-runtime cancellation with a distinct terminal reason and an auditable receipt for evidence committed before verification was skipped.
 - A versioned API review cursor that binds continuation state to a pseudonymous resource digest and rejects cross-resource reuse before scanning.
 - A process-local runtime failure receipt that preserves committed bootstrap work, completed turns, and monotonic usage across later execution, accounting, reasoning, or verification errors.
-- A transport-ownership ADR and architecture invariant that keeps raw network capabilities out of bounded standard-runtime consumers and freezes the legacy phase I/O inventory.
+- A transport-ownership ADR and architecture invariant that keeps raw network capabilities out of bounded standard-runtime consumers and tracks the explicit legacy phase I/O inventory.
 - Planner-selected, versioned payload-strategy reference and derivation contracts with hard byte limits, redacted audit receipts, and fail-closed executor support negotiation; no production payload capability is enabled by this plumbing.
-- A first native production payload strategy, `http.header.control-pair@1`, deriving a deterministic control/candidate pair for a single benign request header, plus a `standard_payload_strategies` registry builder and repeat/concurrency conformance tests.
-- A second native production payload strategy, `api.authorization.context-pair@1`, deriving an anonymous (empty, header-omitting) control and an authorized candidate credential to measure the same resource's visibility difference; registered in `standard_payload_strategies` with repeat/concurrency conformance tests.
+- A first native built-in payload strategy, `http.header.control-pair@1`, deriving a deterministic control/candidate pair for a single benign request header, plus a `standard_payload_strategies` registry builder and repeat/concurrency conformance tests.
+- A second native built-in payload strategy, `api.authorization.context-pair@1`, deriving an anonymous (empty, header-omitting) control and an authorized candidate credential to measure the same resource's visibility difference; registered in `standard_payload_strategies` with repeat/concurrency conformance tests.
 - An observation-only defensive-posture layer (the `defense` module) that fingerprints WAF and edge products with robust case-insensitive header, substring, and cookie matching, and projects a bounded, deterministic `DefenseState` (status class, challenge and rate-limit markers, product fingerprint, and overall posture) from one response. It selects no payload or evasion technique, and drops the brittle `Server: AmazonS3` → AWS WAF inference in favor of confidence-graded signals.
 - A deterministic `DefenseTransition` that compares a control and a candidate `DefenseState` into typed defense-transition evidence (posture shift, newly-blocking/newly-rate-limited flags, status and fingerprint changes, and a `NoChange`/`DefenseEngaged`/`DefenseRelaxed`/`DefenseReconfigured` summary) for a planner to weigh; it makes no payload decision.
 - A deterministic `defense::policy::recommend` escalation policy that maps observed defense evidence to a restrictiveness-ordered `DefenseResponse` (`Proceed`, `Observe`, `Backoff`, `Reconsider`, `Halt`), attributing a candidate-provoked block to the candidate request; it recommends only and selects no payload.
-- Relocated the legacy WAF payload encoders and evasion enum into pure, behavior-equivalent `payload_strategies::encoding` and `payload_strategies::normalization` building blocks, correcting the `EvisionTechnique`/`WhespaceVariation` misspellings to `EvasionTechnique`/`WhitespaceVariation`. The corrected enum stays source- and serialization-compatible (a `From<waf::EvisionTechnique>` conversion and a serde alias for the old spelling), and `encode_into_artifact` routes encoded output through the bounded, redacted payload-artifact contract. Nothing is registered as a runtime strategy, so no scan behavior changes.
 - A strategy-aware `HttpEvidenceExecutor` payload binding (`HttpHeaderPayloadBinding`) that resolves the planner-selected strategy, derives the stage-appropriate control or candidate artifact, applies it through validated `HttpProbe` header construction, and dispatches it over the host request broker; opt-in per executor, with no standard profile enabling it by default.
 - A `StandardWebDecisionRuntimeBuilder::with_payload_binding` opt-in that attaches a payload binding to the bounded runtime's metered `http.evidence` executor, so derived control and candidate dispatches are charged through the runtime's request accounting like any other request.
 - Cumulative request-body accounting at the host-owned broker boundary, including atomic concurrent-limit enforcement and rejection of unmetered bodies.
@@ -63,12 +66,41 @@ All notable changes to Venom are recorded here. Releases use the categories from
 - A host-triggered, single-use JSON authorization-context differential workflow that moves two broker-backed views through Comparator V3, atomic observation ingestion, and exact human-review projection without becoming a planner action or vulnerability verdict.
 - Pinned golden API-authorization replay metadata and broker-backed runtime coverage for anonymous/member, owner/unrelated-user, and read/write-capability context pairs.
 - Bounded, raw-target-free transport dispatch receipts with ordered per-attempt byte accounting and typed completion, failure, timeout, response-limit, and cancellation outcomes.
+- A context-owned legacy discovery authority shared by crawler, optional directory, and parameter phases, with exact-origin redirect-disabled transport plus configurable depth, page, request, request-timeout, wall-time, cumulative-body, and per-response-body limits.
+- A distinct context-owned legacy verification authority for phases five through nine, with exact-origin bodyless transport, `Active`-stage accounting, disabled redirects/retries, and configurable request, timeout, wall-time, cumulative-body, and per-response-body limits.
+- A fail-closed legacy verifier bridge that accepts only allowlisted, case-correlated, knowledge-only `NeedsReview` reports and rolls their public projection back when a phase errors, times out, panics, is cancelled, or exhausts its bounded transport authority.
+- A Preview, opt-in host-library renderer for typed `RunReport` values, with format-safe encoding, an explicit document schema, a hard rendered-byte ceiling, typed failures, and no filesystem, persistence, CLI, or verdict authority.
 
 ### Changed
 
-- Reframed the public README and linked onboarding, distribution, architecture, and profile guidance around the deterministic decision runtime, explicitly separating the legacy direct-I/O scan, unsupported adapters, and library-only surfaces.
+- Switched the pinned repository coverage measurement from Linux's default
+  Ptrace backend to Tarpaulin's explicit LLVM backend and versioned the evidence
+  record as `venom.coverage.v2`, including a normalized line-state digest that
+  makes same-count covered-line drift fail the baseline-acceptance seal.
+- Replaced the Lua fail-closed registry scaffold and loose distributed models
+  with exact private-module/root-facade APIs, independent feature closures, and
+  architecture fingerprints/mutation checks. Lua now executes text-only chunks
+  in fresh no-standard-library VMs; distributed commands use bounded ordered
+  state, explicit logical time/revisions, fenced ownership, atomic retry and
+  recovery, and bounded result retention.
+- Advanced the remediated unreleased source line to the new pre-1.0 minor identity `0.10.0-alpha.1`, so its binaries cannot be confused with the behaviorally different historical `v0.9.0-alpha` artifacts.
+- Removed the disconnected legacy adaptive response scorer and attack-shaped payload mutators; the default-built `adaptive` namespace now contains only the outcome-driven, declarative pipeline.
+- Removed the false legacy WAF detector and attack-shaped evasion dispatcher. The remaining payload-encoding helper supports only explicit percent/hex byte encoding through the bounded, redacted `PayloadArtifact` contract.
+- Quarantined unwired API/auth/dashboard/persistence/realtime models, the bounded report renderer, native plugins, Lua, distributed coordination, and the legacy scanner behind independent opt-in features; the default scanner feature closure is now only `core + scanning`, and optional dependencies follow those boundaries.
+- Replaced the legacy `ScanFinding`-based report and synthetic risk/severity aggregation with a bounded renderer over the constructor-validated `RunReport` contract. It preserves stop classification codes without exposing private stop-reason detail, performs format encoding but no redaction, and requires callers to pre-redact projected target, authorized-origin, step/outcome action-identifier, and outcome-summary fields. The `reporting` feature now closes over `core` only; `VulnerabilityReport`, `risk_score`, `severity_stats`, and `phase_stats` are intentionally removed on this unreleased alpha line.
+- Reduced default `venom-core` to transport-neutral reasoning and run-report contracts. The complete historical configuration, error, event, raw finding, vulnerability, result, and HTTP facade remains available only through `legacy-contracts` so the pinned all-features compatibility gate stays strict without reintroducing those records into default builds.
+- Replaced the false `AsyncMitmProxy`/certificate surface with an honestly named fixed-upstream TCP relay, removed unused HTTP/TLS dependencies, and made the CLI require an explicit validated upstream socket instead of silently choosing `127.0.0.1:80`.
+- Removed the repository installer until a remediated release tag exists. The historical `v0.9.0-alpha` binaries predate the bounded default runtime and are not presented as an installation path for this source state.
+- Made container publication an explicit manual action with commit-scoped development tags, removed unused PostgreSQL/Redis test services, and added CI checks for the inert non-root CLI image.
+- Removed the historical root Compose stack and gated its return while deployment remains unsupported; the stack coupled the CLI to unused services, default credentials, disabled security, and nonexistent listener health semantics.
+- Replaced the original loose `target`/`payload` plugin invocation and plugin-authored `ScanFinding` output with a host-owned bounded context and observation recorder. The Preview API line changes intentionally; plugin observations require host reasoning and verification before any finding projection.
+- Removed the six substring-matching SQL, XSS, LFI, XXE, SSRF, and SSTI types from the production plugin namespace. Harmless INFO-only marker fixtures now exercise the trait boundary under `examples/plugin-fixtures/`, and stock profile scaffolds no longer name nonexistent detector plugins.
+- Made `venom scan` the default bounded deterministic runtime, retained `decision-scan` as a deprecated compatibility alias with the unchanged `decision-scan/v1` wire contract, and moved the historical mixed-authority heuristic runner behind the non-default `legacy-scanner` feature as acknowledged `legacy-scan`.
+- Removed unsupported API and experimental proxy adapters from default CLI builds; their commands now require explicit `api-adapter` or `proxy-adapter` features, and the API adapter fails nonzero instead of implying that a listener started.
+- Changed the repository container's default command to `venom --help`; it no longer starts an experimental network listener by default.
+- Reframed the public README and linked onboarding, distribution, architecture, and profile guidance around the deterministic decision runtime, explicitly separating the opt-in legacy runner, unsupported adapters, and library-only surfaces.
 - Replaced the long-form promotional README with a concise project guide.
-- Standardized the pre-release version as `0.9.0-alpha`.
+- Standardized the historical pre-release baseline as `0.9.0-alpha` before advancing the remediated source line.
 - Replaced absolute completion claims with lifecycle labels such as Beta, Preview, and Experimental.
 - Moved shared event and finding contracts into `venom-core` while preserving scanner re-exports.
 - Documented the plugin system as a source-level preview instead of implying dynamic discovery.
@@ -93,15 +125,18 @@ All notable changes to Venom are recorded here. Releases use the categories from
 - Centralized canonical rule-hypothesis identity generation while preserving existing IDs byte-for-byte.
 - Moved unsafe-code and crate-documentation policy from global compiler flags into centrally inherited workspace lints.
 - Classified per-request deadlines as `RequestTimeout` instead of conflating them with other transport failures.
-- Made classic directory fuzzing an explicit `--legacy-directory-fuzz` CLI option instead of part of every default scan.
-- Made every ordered CLI scan disclose that its legacy direct-I/O phases remain outside `StandardWebDecisionRuntime` and restricted crawler discoveries to the target's exact normalized origin.
+- Made classic directory fuzzing an explicit `--legacy-directory-fuzz` CLI option instead of part of every historical ordered scan.
+- Made every ordered CLI scan disclose that its discovery and active-verification authorities remain separate from `StandardWebDecisionRuntime` and `RuntimeBudget`; phase-one and custom extension direct I/O still keep whole-run accounting `Unmetered`.
+- Replaced broad legacy exploit labels with bounded claim semantics: reproduced SQL diagnostics/timing, exact template arithmetic, and an opt-in benign local-file canary may require manual review; exact reflection stays unresolved, XXE stays inert, and OOB probe delivery records no callback conclusion by itself.
+- Retained the legacy directory/parameter constructor shapes while adding explicit sequential constructors; positive compatibility concurrency values are conservatively narrowed to deterministic sequential dispatch, and the parameter constructor preserves zero as no request authority. Extended the alpha `ScannerError` enum as non-exhaustive before adding typed discovery cancellation, budget, policy, and state-limit failures.
 - Advanced profiled API comparison metadata to v3; persisted v2 profiles are rejected instead of being silently reinterpreted after explanation semantics changed.
 - Changed the alpha `RuntimeUsage.response_bytes` meaning from retained evidence bytes to complete response chunks delivered to the broker collector; a threshold-crossing chunk is charged, audited, and terminates the same turn.
 - Enforced the Preview plugin registry's host-side enable flag, payload-size ceiling, and execution deadline without automatically retrying potentially side-effecting plugin calls.
 - Canonicalized unordered-array path fingerprints once after capture instead of re-sorting a growing digest set for every element, preserving duplicate multiplicity and deterministic comparison semantics.
 - Derived repository-size metric roots from locked Cargo metadata, consolidated release profile policy in the root manifest, and removed redundant development overrides; local parallelism now follows Cargo's host default.
-- Replaced the stale CRA dashboard and unsupported enterprise/API claims with an explicitly disconnected `0.9.0-alpha` Vite preview, a locked zero-advisory dependency tree, and a real server-render smoke test.
+- Replaced the stale CRA dashboard and unsupported enterprise/API claims with an explicitly disconnected `0.10.0-alpha.1` Vite preview, a locked zero-advisory dependency tree, and a real server-render smoke test.
 - Made GitHub releases derive generated notes and prerelease/latest state from each tag instead of reusing the `v0.9.0-alpha` body and classification forever.
+- Made tag publication fail closed until a testable release-metadata command finds a dated changelog section, exact release/comparison links, and a supported-version row for the tagged workspace version; immediately before checksums and create-once publication, the publisher force-refetches the remote tag and binds its peeled commit to the triggering build.
 
 ### Fixed
 
@@ -114,6 +149,17 @@ All notable changes to Venom are recorded here. Releases use the categories from
 
 ### Security
 
+- Hardened Lua registration against root escape, symlink and changed-source
+  inputs; bounded VM memory, instructions, deadline, context, output, return,
+  registry/concurrency/history state; and exposed only a private scalar host
+  environment. These cooperative in-process controls do not hard-preempt
+  parser/native work or provide process isolation, and source digests remain
+  deterministic linkable metadata. Hardened distributed state with ordered
+  collections, integer-only selection, hard capacity ceilings, explicit-time
+  revision checks, private ownership snapshots, retry-backpressure preflight,
+  and redacted opaque payload Debug output; structural tokens remain
+  caller-epoch scoped rather than authenticated cross-instance capabilities.
+- Made plugin registration reject duplicate IDs without replacing existing state, blocked unregistration and same-ID rebinding while an invocation is active, removed decorative retry policy, eliminated registration/execution-boundary panics, and placed plugin network access behind an exact-origin, cancellation-aware broker contract with context-validated capture caps, request/body accounting, opaque error details, and bounded redaction policy.
 - Expanded the responsible disclosure policy, supported-version table, response targets, CVE process, and researcher credit policy.
 - Added hard depth, node, field, and canonical-byte ceilings for API visibility evidence preparation without weakening decision-runner subject isolation.
 - Bounded relation identifiers, endpoints, custom kinds, provenance sets, review cursors, and page cloning; redacted deterministic visibility fingerprints and cursors from `Debug` output.
@@ -121,13 +167,15 @@ All notable changes to Venom are recorded here. Releases use the categories from
 - Made request dispatch, buffered request-body, and delivered response-body charges non-refundable at the transport boundary, including partial reads and executor cancellation, and preserved structured audit receipts for broker limit denials.
 - Bound profiled comparison identities to comparator, canonicalization, and projection-policy metadata; redacted legacy view handles from `Debug` output and kept raw JSON values and clear observed paths out of versioned reports.
 - Made host cancellation preserve monotonic transport accounting and any post-commit, pre-verification evidence receipt without misreporting a wall-time or request-timeout limit.
-- Rejected oversized plugin payloads before plugin code runs and cancelled in-process plugin futures when their configured deadline expires.
+- Rejected oversized plugin payloads before plugin code runs and cooperatively cancelled yielding in-process plugin futures when their configured deadline expires; this is not CPU, memory, blocking-call, or process isolation.
 - Added strict, bounded cursor parsing and redacted cursor diagnostics while preserving the legacy in-process pagination wire contract.
 - Added active multi-request and pre-socket retry budget regressions so nested dispatches cannot escape host accounting.
 - Kept raw strategy seeds and derived artifacts out of serialization and debug output while retaining length, role, revision, and SHA-256 provenance.
 - Isolated control and candidate connection pools while sharing one host-owned accounting authority; exact-target and context-header preflight, two active-verification leases, and monotonic partial/post-commit receipts prevent credential bleed and unaccounted paired transport.
 - Replaced mutable or deprecated security-scanner actions with SHA/digest-pinned RustSec, cargo-deny, Trivy, CodeQL upload, Semgrep, and Codecov integrations; scans use least-privilege job tokens and audit the locked dependency graph without mutating it. Privileged release actions are SHA-pinned as well.
 - Added bounded weekly Dependabot update queues for Cargo, the web preview, and GitHub Actions.
+- Made legacy discovery state error-atomic, limited HTML extraction to complete `text/html` parser trees under a hard 64 KiB parse cap, retained POST/dialog form semantics without GET conversion, calibrated each eligible directory shape against two stable randomized nonexistent paths, and required reproducible four-leg parameter differentials. These remain `INFO` observations projected as `Unknown`, not findings.
+- Hardened the historical verification phases with negative baselines, reproducible controls, randomized probe ordering/operands, robust timing samples, exact nonce/canary replay, and local positive/negative fixtures. Removed default sensitive-file and cloud-metadata payloads; XXE dispatch remains disabled, and SSRF requires explicit OOB configuration while treating HTTP status only as a probe receipt.
 
 ## [0.9.0-alpha] - 2026-07-31
 

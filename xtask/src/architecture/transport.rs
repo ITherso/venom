@@ -43,6 +43,37 @@ const BOUNDED_RUNTIME_SOURCES: &[&str] = &[
 /// The sole raw HTTP-client owner in the bounded runtime.
 const TRANSPORT_OWNER_SOURCE: &str = "crates/venom-scanner/src/http_evidence/request_broker.rs";
 const STANDARD_RUNTIME_COMPOSITION_SOURCE: &str = "crates/venom-scanner/src/web_runtime.rs";
+const LEGACY_DISCOVERY_AUTHORITY_SOURCE: &str = "crates/venom-scanner/src/legacy_discovery.rs";
+
+/// Legacy sources migrated behind context-owned exact-origin, metered
+/// authorities. Discovery and verification have distinct finite envelopes;
+/// phase consumers must never regain the public raw client or construct a
+/// second transport capability.
+const MIGRATED_LEGACY_DISCOVERY_SOURCES: &[&str] = &[
+    LEGACY_DISCOVERY_AUTHORITY_SOURCE,
+    "crates/venom-scanner/src/phases/phase2_crawl.rs",
+    "crates/venom-scanner/src/phases/phase3_fuzzer.rs",
+    "crates/venom-scanner/src/phases/phase4_param.rs",
+    "crates/venom-scanner/src/phases/phase5_sqli.rs",
+    "crates/venom-scanner/src/phases/phase6_xss.rs",
+    "crates/venom-scanner/src/phases/phase7_ssti.rs",
+    "crates/venom-scanner/src/phases/phase8_lfi_xxe.rs",
+    "crates/venom-scanner/src/phases/phase9_ssrf.rs",
+];
+
+const LEGACY_VERIFICATION_PHASE_SOURCES: &[&str] = &[
+    "crates/venom-scanner/src/phases/phase5_sqli.rs",
+    "crates/venom-scanner/src/phases/phase6_xss.rs",
+    "crates/venom-scanner/src/phases/phase7_ssti.rs",
+    "crates/venom-scanner/src/phases/phase8_lfi_xxe.rs",
+    "crates/venom-scanner/src/phases/phase9_ssrf.rs",
+];
+
+const LEGACY_CLAIM_BRIDGE_PHASE_SOURCES: &[&str] = &[
+    "crates/venom-scanner/src/phases/phase5_sqli.rs",
+    "crates/venom-scanner/src/phases/phase7_ssti.rs",
+    "crates/venom-scanner/src/phases/phase8_lfi_xxe.rs",
+];
 
 /// Existing standalone facades that intentionally construct an unmetered
 /// broker because they execute outside `StandardWebDecisionRuntime`.
@@ -64,17 +95,8 @@ const DIRECT_CLIENT_SOURCE_ALLOWLIST: &[&str] = &[
 ];
 
 /// Exact production `.send()` inventory for the legacy phase pipeline.
-const LEGACY_PHASE_SEND_ALLOWLIST: &[(&str, usize)] = &[
-    ("crates/venom-scanner/src/phases/phase1_recon.rs", 1),
-    ("crates/venom-scanner/src/phases/phase2_crawl.rs", 1),
-    ("crates/venom-scanner/src/phases/phase3_fuzzer.rs", 1),
-    ("crates/venom-scanner/src/phases/phase4_param.rs", 1),
-    ("crates/venom-scanner/src/phases/phase5_sqli.rs", 3),
-    ("crates/venom-scanner/src/phases/phase6_xss.rs", 2),
-    ("crates/venom-scanner/src/phases/phase7_ssti.rs", 1),
-    ("crates/venom-scanner/src/phases/phase8_lfi_xxe.rs", 4),
-    ("crates/venom-scanner/src/phases/phase9_ssrf.rs", 2),
-];
+const LEGACY_PHASE_SEND_ALLOWLIST: &[(&str, usize)] =
+    &[("crates/venom-scanner/src/phases/phase1_recon.rs", 1)];
 
 pub(super) fn check(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let mut violations = validate_policy_inventory();
@@ -82,6 +104,16 @@ pub(super) fn check(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>
     for source_name in BOUNDED_RUNTIME_SOURCES {
         let source = fs::read_to_string(workspace_root.join(source_name))?;
         violations.extend(inspect_bounded_source(source_name, &source)?);
+    }
+    for source_name in MIGRATED_LEGACY_DISCOVERY_SOURCES {
+        let source = fs::read_to_string(workspace_root.join(source_name))?;
+        violations.extend(inspect_migrated_discovery_source(source_name, &source)?);
+        if LEGACY_VERIFICATION_PHASE_SOURCES.contains(source_name) {
+            violations.extend(inspect_legacy_verification_claim_language(
+                source_name,
+                &source,
+            ));
+        }
     }
 
     let standard_runtime =
@@ -127,6 +159,39 @@ pub(super) fn check(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>
     Ok(violations)
 }
 
+fn inspect_legacy_verification_claim_language(source_name: &str, source: &str) -> Vec<String> {
+    let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+    let normalized = production.to_ascii_lowercase();
+    let mut violations = [
+        ("confirmed", "verifier-owned confirmation language"),
+        ("vulnerability", "vulnerability language"),
+        ("severity: \"high\"", "HIGH raw severity"),
+        ("severity: \"critical\"", "CRITICAL raw severity"),
+        (" expert", "expert product identity"),
+        ("escaper", "exploit-escaper identity"),
+    ]
+    .into_iter()
+    .filter(|(needle, _)| normalized.contains(needle))
+    .map(|(_, label)| {
+            format!(
+                "{source_name} contains {label} in a legacy verification phase; emit INFO observations and defer claim transitions to a verifier"
+            )
+    })
+    .collect::<Vec<_>>();
+    for (needle, label) in [
+        ("Outcome::new", "direct Outcome construction"),
+        ("RunOutcomeRecord::", "direct run-outcome construction"),
+        ("RunOutcomeRecordInput", "direct run-outcome input"),
+    ] {
+        if production.contains(needle) {
+            violations.push(format!(
+                "{source_name} contains {label}; legacy verification phases must use VerificationReport through the context bridge"
+            ));
+        }
+    }
+    violations
+}
+
 fn inspect_standard_runtime_accounting(source: &str) -> Vec<String> {
     let mut violations = Vec::new();
     if !source.contains("HttpRequestBroker::new_metered(") {
@@ -152,6 +217,16 @@ fn validate_policy_inventory() -> Vec<String> {
         violations.push(format!(
             "transport owner {TRANSPORT_OWNER_SOURCE} must remain separate from bounded consumers"
         ));
+    }
+    let migrated: BTreeSet<_> = MIGRATED_LEGACY_DISCOVERY_SOURCES.iter().copied().collect();
+    if migrated.len() != MIGRATED_LEGACY_DISCOVERY_SOURCES.len() {
+        violations.push("migrated legacy discovery policy contains duplicate sources".to_owned());
+    }
+    if migrated.iter().any(|source| bounded.contains(source)) {
+        violations.push(
+            "migrated legacy discovery sources must remain separate from the standard bounded runtime inventory"
+                .to_owned(),
+        );
     }
     if DIRECT_CLIENT_SOURCE_ALLOWLIST
         .iter()
@@ -191,10 +266,44 @@ fn validate_policy_inventory() -> Vec<String> {
 }
 
 fn inspect_bounded_source(source_name: &str, source: &str) -> Result<Vec<String>, syn::Error> {
+    inspect_owned_transport_source(source_name, source, false, false)
+}
+
+fn inspect_migrated_discovery_source(
+    source_name: &str,
+    source: &str,
+) -> Result<Vec<String>, syn::Error> {
+    let mut violations = inspect_owned_transport_source(source_name, source, true, true)?;
+    if source_name != LEGACY_DISCOVERY_AUTHORITY_SOURCE {
+        let syntax = syn::parse_file(source)?;
+        let mut visitor = DiscoveryConsumerVisitor {
+            source: source_name,
+            context_aliases: collect_context_aliases(&syntax),
+            forbidden_claim_aliases: if LEGACY_VERIFICATION_PHASE_SOURCES.contains(&source_name) {
+                collect_forbidden_claim_aliases(&syntax)
+            } else {
+                BTreeSet::new()
+            },
+            violations: BTreeSet::new(),
+        };
+        visitor.visit_file(&syntax);
+        violations.extend(visitor.violations);
+    }
+    Ok(violations)
+}
+
+fn inspect_owned_transport_source(
+    source_name: &str,
+    source: &str,
+    allow_legacy_context_type: bool,
+    forbid_execute: bool,
+) -> Result<Vec<String>, syn::Error> {
     let syntax = syn::parse_file(source)?;
     let mut visitor = OwnershipVisitor {
         source: source_name,
         inline_module_depth: 0,
+        allow_legacy_context_type,
+        forbid_execute,
         violations: BTreeSet::new(),
     };
     visitor.visit_file(&syntax);
@@ -204,6 +313,8 @@ fn inspect_bounded_source(source_name: &str, source: &str) -> Result<Vec<String>
 struct OwnershipVisitor<'source> {
     source: &'source str,
     inline_module_depth: usize,
+    allow_legacy_context_type: bool,
+    forbid_execute: bool,
     violations: BTreeSet<String>,
 }
 
@@ -237,7 +348,9 @@ impl OwnershipVisitor<'_> {
         let reqwest = segments
             .first()
             .is_some_and(|root| normalize_identifier(root) == "reqwest");
-        if reqwest || is_direct_transport_path(segments) || is_legacy_client_path(segments) {
+        let legacy_client_path = is_legacy_client_path(segments)
+            && !(self.allow_legacy_context_type && is_context_type_path(segments));
+        if reqwest || is_direct_transport_path(segments) || legacy_client_path {
             self.violations.insert(format!(
                 "{} acquires forbidden direct transport path {}; use crate::http_evidence::HttpRequestBroker",
                 self.source,
@@ -308,7 +421,10 @@ impl OwnershipVisitor<'_> {
                 continue;
             };
             let member = ident_name(member);
-            if is_punctuation(dot, '.') && matches!(member.as_str(), "client" | "send") {
+            if is_punctuation(dot, '.')
+                && (matches!(member.as_str(), "client" | "send")
+                    || (self.forbid_execute && member == "execute"))
+            {
                 self.violations.insert(format!(
                     "{} hides forbidden direct transport member .{member} inside a macro",
                     self.source
@@ -397,11 +513,32 @@ impl<'ast> Visit<'ast> for OwnershipVisitor<'_> {
         visit::visit_expr_field(self, expression);
     }
 
+    fn visit_pat_struct(&mut self, pattern: &'ast syn::PatStruct) {
+        for field in &pattern.fields {
+            if matches!(
+                &field.member,
+                syn::Member::Named(member) if ident_name(member) == "client"
+            ) {
+                self.violations.insert(format!(
+                    "{} destructures a raw client field outside the transport owner",
+                    self.source
+                ));
+            }
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
     fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
         let method = ident_name(&expression.method);
         if method == "send" {
             self.violations.insert(format!(
                 "{} calls .send() outside the transport owner",
+                self.source
+            ));
+        }
+        if self.forbid_execute && method == "execute" {
+            self.violations.insert(format!(
+                "{} calls .execute() outside the bounded discovery broker",
                 self.source
             ));
         }
@@ -418,6 +555,438 @@ impl<'ast> Visit<'ast> for OwnershipVisitor<'_> {
     fn visit_macro(&mut self, item: &'ast Macro) {
         self.inspect_macro(item.tokens.clone());
         visit::visit_macro(self, item);
+    }
+}
+
+struct DiscoveryConsumerVisitor<'source> {
+    source: &'source str,
+    context_aliases: BTreeSet<String>,
+    forbidden_claim_aliases: BTreeSet<String>,
+    violations: BTreeSet<String>,
+}
+
+const FORBIDDEN_LEGACY_CLAIM_TYPES: &[&str] =
+    &["Outcome", "RunOutcomeRecord", "RunOutcomeRecordInput"];
+
+fn collect_forbidden_claim_aliases(syntax: &syn::File) -> BTreeSet<String> {
+    let mut aliases = FORBIDDEN_LEGACY_CLAIM_TYPES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<BTreeSet<_>>();
+    for item in &syntax.items {
+        match item {
+            Item::Use(item_use) if !has_cfg_test(&item_use.attrs) => {
+                let mut paths = Vec::new();
+                collect_use_paths(&item_use.tree, Vec::new(), &mut paths);
+                for (segments, binding, _) in paths {
+                    if segments.last().is_some_and(|segment| {
+                        FORBIDDEN_LEGACY_CLAIM_TYPES.contains(&normalize_identifier(segment))
+                    }) {
+                        if let Some(alias) = binding.or_else(|| segments.last().cloned()) {
+                            aliases.insert(normalize_identifier(&alias).to_owned());
+                        }
+                    }
+                }
+            },
+            Item::Type(item_type) if !has_cfg_test(&item_type.attrs) => {
+                if let syn::Type::Path(path) = item_type.ty.as_ref() {
+                    if path.path.segments.last().is_some_and(|segment| {
+                        FORBIDDEN_LEGACY_CLAIM_TYPES
+                            .contains(&normalize_identifier(&segment.ident.to_string()))
+                    }) {
+                        aliases
+                            .insert(normalize_identifier(&item_type.ident.to_string()).to_owned());
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    aliases
+}
+
+fn collect_context_aliases(syntax: &syn::File) -> BTreeSet<String> {
+    let mut collector = ContextAliasCollector::default();
+    collector.visit_file(syntax);
+
+    let mut aliases = BTreeSet::from(["ScanContext".to_owned()]);
+    aliases.extend(collector.direct_aliases);
+    loop {
+        let mut changed = false;
+        for (alias, source) in &collector.alias_edges {
+            if source
+                .iter()
+                .any(|segment| aliases.contains(normalize_identifier(segment)))
+            {
+                changed |= aliases.insert(alias.clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    aliases
+}
+
+#[derive(Default)]
+struct ContextAliasCollector {
+    direct_aliases: BTreeSet<String>,
+    alias_edges: Vec<(String, Vec<String>)>,
+}
+
+impl<'ast> Visit<'ast> for ContextAliasCollector {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !has_cfg_test(item_attributes(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut paths = Vec::new();
+        collect_use_paths(&item.tree, Vec::new(), &mut paths);
+        for (segments, binding, _) in paths {
+            let Some(alias) = binding
+                .or_else(|| segments.last().cloned())
+                .map(|value| normalize_identifier(&value).to_owned())
+            else {
+                continue;
+            };
+            if is_context_type_path(&segments) {
+                self.direct_aliases.insert(alias);
+            } else {
+                self.alias_edges.push((alias, segments));
+            }
+        }
+        visit::visit_item_use(self, item);
+    }
+
+    fn visit_item_type(&mut self, item: &'ast syn::ItemType) {
+        if let syn::Type::Path(path) = item.ty.as_ref() {
+            self.alias_edges.push((
+                normalize_identifier(&item.ident.to_string()).to_owned(),
+                path_segments(&path.path),
+            ));
+        }
+        visit::visit_item_type(self, item);
+    }
+}
+
+fn is_internal_discovery_path(segments: &[String]) -> bool {
+    segments
+        .first()
+        .is_some_and(|root| matches!(normalize_identifier(root), "crate" | "super"))
+}
+
+fn is_allowed_discovery_consumer_path(source: &str, segments: &[String]) -> bool {
+    if segments.len() == 1
+        && segments
+            .first()
+            .is_some_and(|root| matches!(normalize_identifier(root), "crate" | "super"))
+    {
+        // Restricted visibilities such as `pub(super)` are not dependency
+        // paths. Broad root imports are rejected separately by OwnershipVisitor.
+        return true;
+    }
+    let segment = |index: usize| {
+        segments
+            .get(index)
+            .map(String::as_str)
+            .map(normalize_identifier)
+    };
+    let claim_bridge = LEGACY_CLAIM_BRIDGE_PHASE_SOURCES.contains(&source);
+    match segment(0) {
+        Some("crate") => match (segment(1), segment(2)) {
+            (
+                Some(
+                    "ActiveVerifier" | "Expression" | "KnowledgeLayer" | "VerificationCase"
+                    | "VerificationReport" | "VerificationRule",
+                ),
+                None,
+            ) if claim_bridge => true,
+            (Some("knowledge"), Some("KnowledgeWrite")) if claim_bridge => true,
+            (Some("rules"), Some("Expression" | "KnowledgeLayer")) if claim_bridge => true,
+            (
+                Some("verification"),
+                Some(
+                    "ActiveVerifier" | "VerificationCase" | "VerificationReport"
+                    | "VerificationRule",
+                ),
+            ) if claim_bridge => true,
+            (Some("context"), Some("ScanContext")) => segments.len() == 3,
+            (Some("contracts"), Some("ScanFinding" | "ScanPhase")) => true,
+            (Some("error"), Some("ScannerError")) => true,
+            (Some("http_evidence"), Some("HttpProbeMethod")) => true,
+            (
+                Some("legacy_discovery"),
+                Some(
+                    "BoundedHttpResponse"
+                    | "DiscoveryDelta"
+                    | "DiscoveryForm"
+                    | "DiscoveryFormMethod",
+                ),
+            ) => true,
+            _ => false,
+        },
+        Some("super") => {
+            source == "crates/venom-scanner/src/phases/phase4_param.rs"
+                && segment(1) == Some("phase3_fuzzer")
+                && segment(2) == Some("ResponseSignature")
+        },
+        _ => false,
+    }
+}
+
+impl DiscoveryConsumerVisitor<'_> {
+    fn inspect_segments(&mut self, segments: &[String]) {
+        if LEGACY_VERIFICATION_PHASE_SOURCES.contains(&self.source)
+            && segments.iter().any(|segment| {
+                self.forbidden_claim_aliases
+                    .contains(normalize_identifier(segment))
+            })
+        {
+            self.violations.insert(format!(
+                "{} imports or constructs a direct outcome type {}; use VerificationReport through the context bridge",
+                self.source,
+                display_path(segments)
+            ));
+        }
+        let forbidden = segments.iter().any(|segment| {
+            matches!(
+                normalize_identifier(segment),
+                "HttpEvidenceExecutor"
+                    | "HttpEvidencePolicy"
+                    | "HttpRequestBroker"
+                    | "RequestAccountingBroker"
+                    | "RuntimeBudget"
+                    | "ScannerSdk"
+                    | "StandardWebDiscoveryExecutorProfile"
+                    | "LegacyDiscoveryAuthority"
+                    | "LegacyVerificationAuthority"
+                    | "VerificationLimits"
+            )
+        });
+        if forbidden {
+            self.violations.insert(format!(
+                "{} imports or constructs discovery authority internals {}; phase consumers must use ScanContext request/state seams",
+                self.source,
+                display_path(segments)
+            ));
+        }
+        let context_qualifier = segments.iter().enumerate().any(|(index, segment)| {
+            let segment = normalize_identifier(segment);
+            self.context_aliases.contains(segment) && index + 1 < segments.len()
+        });
+        if context_qualifier {
+            self.violations.insert(format!(
+                "{} uses a ScanContext associated path inside a migrated phase; accept the host-owned shared context and use its instance seams",
+                self.source
+            ));
+        }
+        if is_internal_discovery_path(segments)
+            && !is_allowed_discovery_consumer_path(self.source, segments)
+        {
+            self.violations.insert(format!(
+                "{} reaches internal path {} outside the strict migrated-discovery API allowlist",
+                self.source,
+                display_path(segments)
+            ));
+        }
+    }
+
+    fn inspect_macro(&mut self, stream: TokenStream) {
+        let tokens: Vec<_> = stream.into_iter().collect();
+        for token in &tokens {
+            if let TokenTree::Group(group) = token {
+                self.inspect_macro(group.stream());
+            }
+            if let TokenTree::Ident(identifier) = token {
+                self.inspect_segments(&[identifier.to_string()]);
+            }
+        }
+        for start in 0..tokens.len() {
+            let TokenTree::Ident(root) = &tokens[start] else {
+                continue;
+            };
+            let mut segments = vec![root.to_string()];
+            let mut cursor = start + 1;
+            while cursor + 2 < tokens.len()
+                && is_colon(&tokens[cursor])
+                && is_colon(&tokens[cursor + 1])
+            {
+                let TokenTree::Ident(segment) = &tokens[cursor + 2] else {
+                    break;
+                };
+                segments.push(segment.to_string());
+                cursor += 3;
+            }
+            if segments.len() > 1 {
+                self.inspect_segments(&segments);
+            }
+        }
+        for window in tokens.windows(2) {
+            let [dot, TokenTree::Ident(member)] = window else {
+                continue;
+            };
+            if is_punctuation(dot, '.')
+                && matches!(
+                    ident_name(member).as_str(),
+                    "add_endpoint"
+                        | "mark_visited"
+                        | "with_pre_execution_discovery_limits"
+                        | "with_pre_execution_verification_limits"
+                        | "new_with_discovery_limits"
+                        | "new_with_verification_limits"
+                        | "discovered_endpoints"
+                        | "visited_urls"
+                )
+            {
+                self.violations.insert(format!(
+                    "{} hides a typed-discovery authority bypass inside a macro",
+                    self.source
+                ));
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for DiscoveryConsumerVisitor<'_> {
+    fn visit_item(&mut self, item: &'ast Item) {
+        if !has_cfg_test(item_attributes(item)) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut paths = Vec::new();
+        collect_use_paths(&item.tree, Vec::new(), &mut paths);
+        for (segments, binding, _) in paths {
+            if is_context_type_path(&segments) {
+                let alias = binding
+                    .or_else(|| segments.last().cloned())
+                    .map(|value| normalize_identifier(&value).to_owned());
+                if let Some(alias) = alias {
+                    self.context_aliases.insert(alias);
+                }
+            }
+            self.inspect_segments(&segments);
+        }
+        visit::visit_item_use(self, item);
+    }
+
+    fn visit_path(&mut self, path: &'ast SynPath) {
+        self.inspect_segments(&path_segments(path));
+        visit::visit_path(self, path);
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        if expression
+            .qself
+            .as_ref()
+            .is_some_and(|qself| type_contains_alias(qself.ty.as_ref(), &self.context_aliases))
+        {
+            self.violations.insert(format!(
+                "{} uses a qualified ScanContext associated path inside a migrated phase; use the host-owned shared context",
+                self.source
+            ));
+        }
+        visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_expr_field(&mut self, expression: &'ast syn::ExprField) {
+        if matches!(
+            &expression.member,
+            syn::Member::Named(member)
+                if matches!(ident_name(member).as_str(), "discovered_endpoints" | "visited_urls")
+        ) {
+            self.violations.insert(format!(
+                "{} accesses legacy discovery compatibility state directly; use typed snapshots and atomic deltas",
+                self.source
+            ));
+        }
+        visit::visit_expr_field(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        let method = ident_name(&expression.method);
+        if matches!(
+            method.as_str(),
+            "add_endpoint"
+                | "mark_visited"
+                | "with_pre_execution_discovery_limits"
+                | "with_pre_execution_verification_limits"
+                | "new_with_discovery_limits"
+                | "new_with_verification_limits"
+        ) {
+            self.violations.insert(format!(
+                "{} bypasses or replaces the shared typed discovery authority",
+                self.source
+            ));
+        }
+        if LEGACY_VERIFICATION_PHASE_SOURCES.contains(&self.source) && method == "request" {
+            self.violations.insert(format!(
+                "{} consumes the passive discovery request seam from a verification phase; use verification_request",
+                self.source
+            ));
+        }
+        if !LEGACY_VERIFICATION_PHASE_SOURCES.contains(&self.source)
+            && self.source != LEGACY_DISCOVERY_AUTHORITY_SOURCE
+            && method == "verification_request"
+        {
+            self.violations.insert(format!(
+                "{} consumes the active verification request seam from a discovery phase",
+                self.source
+            ));
+        }
+        visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_expr_struct(&mut self, expression: &'ast syn::ExprStruct) {
+        let segments = path_segments(&expression.path);
+        if segments
+            .last()
+            .is_some_and(|item| self.context_aliases.contains(normalize_identifier(item)))
+        {
+            self.violations.insert(format!(
+                "{} constructs a fresh ScanContext struct inside a migrated phase; use the host-owned shared context",
+                self.source
+            ));
+        }
+        visit::visit_expr_struct(self, expression);
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &'ast syn::PatStruct) {
+        for field in &pattern.fields {
+            if matches!(
+                &field.member,
+                syn::Member::Named(member)
+                    if matches!(ident_name(member).as_str(), "discovered_endpoints" | "visited_urls")
+            ) {
+                self.violations.insert(format!(
+                    "{} destructures legacy compatibility state instead of using typed discovery state",
+                    self.source
+                ));
+            }
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_macro(&mut self, item: &'ast Macro) {
+        self.inspect_macro(item.tokens.clone());
+        visit::visit_macro(self, item);
+    }
+}
+
+fn type_contains_alias(ty: &syn::Type, aliases: &BTreeSet<String>) -> bool {
+    match ty {
+        syn::Type::Group(group) => type_contains_alias(&group.elem, aliases),
+        syn::Type::Paren(parenthesized) => type_contains_alias(&parenthesized.elem, aliases),
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .any(|segment| aliases.contains(normalize_identifier(&segment.ident.to_string()))),
+        syn::Type::Reference(reference) => type_contains_alias(&reference.elem, aliases),
+        _ => false,
     }
 }
 
@@ -440,6 +1009,18 @@ fn is_legacy_client_path(segments: &[String]) -> bool {
         && segments
             .get(1)
             .is_some_and(|module| matches!(normalize_identifier(module), "context" | "sdk"))
+}
+
+fn is_context_type_path(segments: &[String]) -> bool {
+    segments
+        .first()
+        .is_some_and(|root| normalize_identifier(root) == "crate")
+        && segments
+            .get(1)
+            .is_some_and(|module| normalize_identifier(module) == "context")
+        && segments
+            .get(2)
+            .is_some_and(|item| normalize_identifier(item) == "ScanContext")
 }
 
 fn is_direct_transport_path(segments: &[String]) -> bool {
@@ -815,6 +1396,263 @@ mod tests {
         .join("\n");
         assert!(violations.contains("must construct its broker"));
         assert!(violations.contains("must not construct an unmetered"));
+    }
+
+    #[test]
+    fn migrated_discovery_can_use_context_type_but_not_raw_transport() {
+        let safe = r#"
+            use crate::context::ScanContext;
+            async fn discover(context: &ScanContext) { context.request(); }
+        "#;
+        assert!(inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase2_crawl.rs",
+            safe,
+        )
+        .unwrap()
+        .is_empty());
+
+        for source in [
+            "use crate::context::ScanContext; fn leak(context: &ScanContext) { let _ = &context.client; }",
+            "use reqwest::Client; fn leak() { let _ = Client::new(); }",
+            "fn leak(client: Client, request: Request) { client.execute(request); }",
+            "fn leak(client: Client) { client.get(\"https://example.test\").send(); }",
+            "fn leak(policy: Policy) { HttpRequestBroker::new_unmetered(policy); }",
+            "fn leak(context: ScanContext) { let ScanContext { client: raw, .. } = context; raw.dispatch(); }",
+        ] {
+            assert!(
+                !inspect_migrated_discovery_source(
+                    "crates/venom-scanner/src/phases/phase2_crawl.rs",
+                    source,
+                )
+                .unwrap()
+                .is_empty(),
+                "migrated discovery transport escape unexpectedly passed: {source}"
+            );
+        }
+
+        for source in [
+            "use venom_core::Outcome as Claim; fn forge() { Claim::new(input()); }",
+            "type Claim = venom_core::RunOutcomeRecord; fn forge() { Claim::unresolved(a(), b(), c(), d()); }",
+            "fn forge() { audit!(venom_core::RunOutcomeRecord::from_outcome(a(), b())); }",
+        ] {
+            let violations = inspect_migrated_discovery_source(
+                "crates/venom-scanner/src/phases/phase9_ssrf.rs",
+                source,
+            )
+            .unwrap();
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.contains("direct outcome type")),
+                "direct claim alias unexpectedly passed: {source}; {violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn migrated_phase_consumers_cannot_multiply_or_bypass_discovery_authority() {
+        for source in [
+            "use crate::http_evidence::HttpRequestBroker; fn escape() { HttpRequestBroker::new_metered(); }",
+            "use crate::runtime_budget::RequestAccountingBroker;",
+            "use crate::RuntimeBudget;",
+            "use crate::legacy_discovery::LegacyDiscoveryAuthority;",
+            "use crate::legacy_discovery::LegacyVerificationAuthority;",
+            "use crate::VerificationLimits;",
+            "fn escape(context: &ScanContext) { context.add_endpoint(); }",
+            "fn escape(context: &ScanContext) { context.mark_visited(); }",
+            "fn escape(context: &ScanContext) { let _ = &context.discovered_endpoints; }",
+            "fn escape(context: &ScanContext) { let _ = &context.visited_urls; }",
+            "fn escape(context: ScanContext) { context.with_pre_execution_discovery_limits(); }",
+            "fn escape(context: ScanContext) { context.with_pre_execution_verification_limits(); }",
+            "fn escape() { crate::context::ScanContext::new(target(), Default::default(), telemetry()); }",
+            "use crate::context::ScanContext as Fresh; fn escape() { Fresh::with_timeout(target(), Default::default(), telemetry(), 30); }",
+            "fn escape(context: ScanContext) { let ScanContext { discovered_endpoints, .. } = context; mutate(discovered_endpoints); }",
+            "fn escape() { policy!(LegacyDiscoveryAuthority::new()); }",
+            "fn escape(context: &ScanContext) { policy!(context.add_endpoint()); }",
+        ] {
+            assert!(
+                !inspect_migrated_discovery_source(
+                    "crates/venom-scanner/src/phases/phase2_crawl.rs",
+                    source,
+                )
+                .unwrap()
+                .is_empty(),
+                "discovery authority escape unexpectedly passed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn migrated_phases_cannot_cross_passive_and_active_request_seams() {
+        let passive = "use crate::context::ScanContext; async fn run(context: &ScanContext) { context.request(); }";
+        assert!(inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase2_crawl.rs",
+            passive,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(!inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase5_sqli.rs",
+            passive,
+        )
+        .unwrap()
+        .is_empty());
+
+        let active = "use crate::context::ScanContext; async fn run(context: &ScanContext) { context.verification_request(); }";
+        assert!(inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase5_sqli.rs",
+            active,
+        )
+        .unwrap()
+        .is_empty());
+        assert!(!inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase2_crawl.rs",
+            active,
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn legacy_verification_claim_language_is_fail_closed() {
+        let safe = r#"
+            fn observation() -> ScanFinding {
+                ScanFinding { severity: "INFO", description: "manual review", evidence: "bounded" }
+            }
+            #[cfg(test)]
+            mod tests { const NEGATIVE_ASSERTION: &str = "not confirmed"; }
+        "#;
+        assert!(inspect_legacy_verification_claim_language("phase.rs", safe).is_empty());
+
+        for source in [
+            "fn result() { let _ = \"confirmed SQL injection\"; }",
+            "fn result() { let _ = \"vulnerability\"; }",
+            "fn result() { ScanFinding { severity: \"HIGH\" }; }",
+            "fn result() { ScanFinding { severity: \"CRITICAL\" }; }",
+            "fn name() -> &'static str { \"SQL Expert\" }",
+            "fn name() -> &'static str { \"Sandbox Escaper\" }",
+            "fn forge() { Outcome::new(input()); }",
+            "fn forge() { RunOutcomeRecord::unresolved(a(), b(), c(), d()); }",
+            "fn forge(_: RunOutcomeRecordInput) {}",
+        ] {
+            assert!(
+                !inspect_legacy_verification_claim_language("phase.rs", source).is_empty(),
+                "legacy claim language unexpectedly passed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn migrated_phase_consumers_reject_every_alternate_runtime_constructor() {
+        for source in [
+            r#"
+                use crate::http_evidence::{HttpEvidenceExecutor, HttpEvidencePolicy};
+                fn escape(policy: HttpEvidencePolicy, probes: Probes) {
+                    let executor = HttpEvidenceExecutor::new(policy, probes);
+                    DecisionActionExecutor::execute(&executor, action(), context());
+                }
+            "#,
+            r#"
+                use crate::web_execution::StandardWebDiscoveryExecutorProfile;
+                fn escape(policy: Policy) {
+                    StandardWebDiscoveryExecutorProfile::new(policy);
+                }
+            "#,
+            r#"
+                use crate::context::ScanContext;
+                fn escape() {
+                    ScanContext::new(target(), Default::default(), telemetry());
+                }
+            "#,
+            r#"
+                use crate::context::ScanContext as Fresh;
+                fn escape() {
+                    Fresh::new(target(), Default::default(), telemetry());
+                }
+            "#,
+            r#"
+                use crate::context::ScanContext;
+                type Fresh = ScanContext;
+                fn escape() {
+                    Fresh::with_event_bus(target(), Default::default(), telemetry(), events());
+                }
+            "#,
+            r#"
+                use crate::context::ScanContext;
+                fn escape() {
+                    <ScanContext>::new(target(), Default::default(), telemetry());
+                }
+            "#,
+            r#"
+                use crate::context::ScanContext as Fresh;
+                fn escape() {
+                    <Fresh>::with_event_bus(
+                        target(), Default::default(), telemetry(), events(),
+                    );
+                }
+            "#,
+            r#"
+                use crate::sdk::ScannerSdk;
+                fn escape() { ScannerSdk::builder(); }
+            "#,
+        ] {
+            assert!(
+                !inspect_migrated_discovery_source(
+                    "crates/venom-scanner/src/phases/phase2_crawl.rs",
+                    source,
+                )
+                .unwrap()
+                .is_empty(),
+                "alternate migrated-discovery runtime unexpectedly passed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn migrated_phase_internal_api_allowlist_is_exact() {
+        let allowed = r#"
+            use crate::{
+                context::ScanContext,
+                contracts::{ScanFinding, ScanPhase},
+                error::ScannerError,
+                http_evidence::HttpProbeMethod,
+                legacy_discovery::{
+                    BoundedHttpResponse, DiscoveryDelta, DiscoveryForm, DiscoveryFormMethod,
+                },
+            };
+            use super::phase3_fuzzer::ResponseSignature;
+
+            fn consume(
+                context: &ScanContext,
+                response: &BoundedHttpResponse,
+            ) -> Result<(HttpProbeMethod, DiscoveryDelta), ScannerError> {
+                let _ = (context, response);
+                Ok((HttpProbeMethod::Get, DiscoveryDelta::new()))
+            }
+        "#;
+        assert!(inspect_migrated_discovery_source(
+            "crates/venom-scanner/src/phases/phase4_param.rs",
+            allowed,
+        )
+        .unwrap()
+        .is_empty());
+
+        for source in [
+            "use crate::sdk::ScannerBuilder;",
+            "use crate::web_runtime::StandardWebDecisionRuntime;",
+            "use crate::context::DiscoveryAuthority;",
+            "use super::phase2_crawl::CrawlPhase;",
+        ] {
+            assert!(
+                !inspect_migrated_discovery_source(
+                    "crates/venom-scanner/src/phases/phase4_param.rs",
+                    source,
+                )
+                .unwrap()
+                .is_empty(),
+                "non-allowlisted internal path unexpectedly passed: {source}"
+            );
+        }
     }
 
     #[test]
