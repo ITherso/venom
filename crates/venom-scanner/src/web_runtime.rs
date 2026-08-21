@@ -25,9 +25,9 @@ use venom_core::{
     VerificationStage,
 };
 
+use crate::http_evidence::CompleteHttpResponseObserver;
 use crate::{
-    http_evidence::HttpRequestBroker, runtime_budget::RequestAccountingBroker, AdaptationLimits,
-    AdaptationRule, AdaptivePipelineError, BenefitScore, DecisionActionOrigin,
+    AdaptationLimits, AdaptationRule, AdaptivePipelineError, BenefitScore, DecisionActionOrigin,
     DecisionEvidenceReceipt, DecisionExecutionClass, DecisionExecutionFailureReceipt,
     DecisionExecutionLimits, DecisionExecutionStage, DecisionExecutorRegistry, DecisionLoop,
     DecisionLoopCommand, DecisionLoopConfig, DecisionLoopError, DecisionOutcomeReport,
@@ -44,6 +44,9 @@ use crate::{
 };
 
 mod api_visibility;
+mod authority;
+
+pub(crate) use authority::SharedWebRuntimeAuthority;
 
 pub use api_visibility::{
     ApiVisibilityContextProbe, ApiVisibilityDifferentialAudit,
@@ -58,9 +61,9 @@ const DEFAULT_PLANNING_BUDGET: u64 = 100;
 const DEFAULT_RISK_LIMIT_PERCENT: u8 = 40;
 const DEFAULT_MAX_ACTION_CYCLES: u32 = 8;
 const DEFAULT_FAILURE_LIMIT: u16 = 10;
-const BOOTSTRAP_ACTION_ID: &str = "web.action.bootstrap.http-evidence";
-const BOOTSTRAP_CASE_ID: &str = "case:web-runtime:bootstrap:http";
-const BOOTSTRAP_HYPOTHESIS_ID: &str = "hypothesis:web-runtime:bootstrap";
+pub(crate) const BOOTSTRAP_ACTION_ID: &str = "web.action.bootstrap.http-evidence";
+pub(crate) const BOOTSTRAP_CASE_ID: &str = "case:web-runtime:bootstrap:http";
+pub(crate) const BOOTSTRAP_HYPOTHESIS_ID: &str = "hypothesis:web-runtime:bootstrap";
 /// Construction and execution failures for [`StandardWebDecisionRuntime`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -145,6 +148,20 @@ impl StandardWebDecisionRuntimeError {
         match self {
             Self::RunFailed { receipt, .. } => Some(receipt),
             _ => None,
+        }
+    }
+
+    /// Removes the subject-local audit from a started failure without carrying
+    /// its cumulative authority snapshots into an outer assessment receipt.
+    pub(crate) fn into_assessment_failure(
+        self,
+    ) -> (
+        StandardWebDecisionAssessmentFailureParts,
+        StandardWebDecisionRuntimeError,
+    ) {
+        match self {
+            Self::RunFailed { receipt, source } => (receipt.into_assessment_parts(), *source),
+            source => (StandardWebDecisionAssessmentFailureParts::default(), source),
         }
     }
 
@@ -263,6 +280,19 @@ impl StandardWebDecisionFailureReceipt {
     pub fn transport(&self) -> &TransportDispatchAudit {
         &self.transport
     }
+
+    fn into_assessment_parts(self: Box<Self>) -> StandardWebDecisionAssessmentFailureParts {
+        let Self {
+            bootstrap,
+            completed_turns,
+            usage: _,
+            transport: _,
+        } = *self;
+        StandardWebDecisionAssessmentFailureParts {
+            bootstrap,
+            turns: completed_turns,
+        }
+    }
 }
 
 /// Complete audit trail from bootstrap evidence to a terminal command.
@@ -276,6 +306,30 @@ pub struct StandardWebDecisionRunReport {
     transport: TransportDispatchAudit,
     limit_exceeded: Option<RuntimeLimitExceeded>,
     execution_failure: Option<DecisionExecutionFailureReceipt>,
+}
+
+/// Standard-run audit parts retained by one origin-assessment subject.
+///
+/// Usage and transport are intentionally absent. Every assessment subject uses
+/// one shared authority, so only the outer assessment report may expose those
+/// cumulative records.
+pub(crate) struct StandardWebDecisionAssessmentParts {
+    pub(crate) bootstrap: Option<DecisionEvidenceReceipt>,
+    pub(crate) turns: Vec<StandardWebDecisionRuntimeTurn>,
+    pub(crate) unverified_evidence: Option<DecisionEvidenceReceipt>,
+    pub(crate) terminal: DecisionLoopCommand,
+    pub(crate) limit_exceeded: Option<RuntimeLimitExceeded>,
+    pub(crate) execution_failure: Option<DecisionExecutionFailureReceipt>,
+}
+
+/// Subject-local work preserved from a failed Standard runtime.
+///
+/// The global usage and transport snapshots are intentionally discarded; the
+/// host assessment owns exactly one cumulative authority audit.
+#[derive(Default)]
+pub(crate) struct StandardWebDecisionAssessmentFailureParts {
+    pub(crate) bootstrap: Option<DecisionEvidenceReceipt>,
+    pub(crate) turns: Vec<StandardWebDecisionRuntimeTurn>,
 }
 
 impl StandardWebDecisionRunReport {
@@ -340,6 +394,17 @@ impl StandardWebDecisionRunReport {
             StandardWebDecisionRuntimeTurn::Planning(_) => None,
         })
     }
+
+    pub(crate) fn into_assessment_parts(self) -> StandardWebDecisionAssessmentParts {
+        StandardWebDecisionAssessmentParts {
+            bootstrap: self.bootstrap,
+            turns: self.turns,
+            unverified_evidence: self.unverified_evidence,
+            terminal: self.terminal,
+            limit_exceeded: self.limit_exceeded,
+            execution_failure: self.execution_failure,
+        }
+    }
 }
 
 /// Builder for one target-scoped [`StandardWebDecisionRuntime`].
@@ -357,6 +422,14 @@ pub struct StandardWebDecisionRuntimeBuilder {
     api_reasoning_enabled: bool,
     payload_binding: Option<HttpHeaderPayloadBinding>,
     cancellation: CancellationToken,
+    bootstrap_probe_method: HttpProbeMethod,
+    complete_response_observer: Option<Arc<dyn CompleteHttpResponseObserver>>,
+    additional_suppressed_actions: BTreeSet<String>,
+}
+
+struct StandardWebDecisionRuntimePreflight {
+    config: DecisionLoopConfig,
+    subject: EntityId,
 }
 
 impl StandardWebDecisionRuntimeBuilder {
@@ -376,6 +449,9 @@ impl StandardWebDecisionRuntimeBuilder {
             api_reasoning_enabled: false,
             payload_binding: None,
             cancellation: CancellationToken::new(),
+            bootstrap_probe_method: HttpProbeMethod::Get,
+            complete_response_observer: None,
+            additional_suppressed_actions: BTreeSet::new(),
         }
     }
 
@@ -464,6 +540,28 @@ impl StandardWebDecisionRuntimeBuilder {
         self
     }
 
+    /// Installs the sealed assessment projection on the bootstrap request.
+    ///
+    /// HEAD subjects are metadata observations only: all post-bootstrap
+    /// semantic actions are suppressed so they cannot silently become GET or
+    /// OPTIONS work. GET subjects retain the standard decision behavior.
+    pub(crate) fn with_assessment_response_observer(
+        mut self,
+        method: HttpProbeMethod,
+        observer: Arc<dyn CompleteHttpResponseObserver>,
+    ) -> Self {
+        self.bootstrap_probe_method = method;
+        self.complete_response_observer = Some(observer);
+        if method == HttpProbeMethod::Head {
+            self.additional_suppressed_actions.extend(
+                StandardWebActionKind::all()
+                    .into_iter()
+                    .map(|kind| kind.action_id().to_owned()),
+            );
+        }
+        self
+    }
+
     /// Sets the total bootstrap, passive, active, adaptive, and retry request limit.
     pub fn max_total_requests(mut self, limit: u32) -> Self {
         self.runtime_budget = self.runtime_budget.with_max_total_requests(limit);
@@ -504,20 +602,46 @@ impl StandardWebDecisionRuntimeBuilder {
 
     /// Validates policy and composes the complete standard runtime.
     pub fn build(self) -> Result<StandardWebDecisionRuntime, StandardWebDecisionRuntimeError> {
-        let policy = match self.http_policy {
+        let policy = match self.http_policy.clone() {
             Some(policy) => policy,
             None => HttpEvidencePolicy::for_origin(self.target.clone())?,
         };
+        // Preserve the public builder's historical fail-fast order. Target,
+        // scope, planning, decision, and subject validation all run before the
+        // reqwest-backed authority is constructed.
+        self.preflight(|target| policy.require_permitted_target(target))?;
+        let authority = SharedWebRuntimeAuthority::new_exact_origin(
+            &self.target,
+            policy,
+            self.runtime_budget,
+            self.cancellation.clone(),
+        )?;
+        // Delegate through the same subject-composition seam used by the
+        // assessment runtime. Its second pure preflight validates the narrowed
+        // authority but cannot change the already-established public error order.
+        self.build_with_shared_authority(authority)
+    }
+
+    /// Composes one subject runtime under an already-created origin authority.
+    ///
+    /// The authority, rather than this builder's standalone policy/budget/token
+    /// fields, owns all resource and network capability. This seam remains
+    /// crate-private so an assessment can create many subject runtimes without
+    /// exposing a public way to mix independent authorities.
+    pub(crate) fn build_with_shared_authority(
+        self,
+        authority: SharedWebRuntimeAuthority,
+    ) -> Result<StandardWebDecisionRuntime, StandardWebDecisionRuntimeError> {
+        let preflight = self.preflight(|target| authority.authorize_target(target))?;
+        self.compose_with_shared_authority(authority, preflight)
+    }
+
+    fn preflight(
+        &self,
+        authorize: impl FnOnce(&Url) -> Result<(), HttpEvidenceError>,
+    ) -> Result<StandardWebDecisionRuntimePreflight, StandardWebDecisionRuntimeError> {
         let probe = HttpProbe::new(self.target.clone(), HttpProbeMethod::Get)?;
-        if !policy
-            .allowed_origins()
-            .contains(&probe.url().origin().ascii_serialization())
-        {
-            return Err(HttpEvidenceError::TargetOutsidePolicy {
-                url: self.target.to_string(),
-            }
-            .into());
-        }
+        authorize(probe.url())?;
 
         let planning = PlanningContext::new(
             BenefitScore::from_percent(self.business_value_percent)?,
@@ -531,14 +655,22 @@ impl StandardWebDecisionRuntimeBuilder {
             self.max_action_cycles,
         )?;
         let subject = EntityId::new(format!("endpoint:{}", self.target))?;
-        let knowledge = KnowledgeBase::new();
+        Ok(StandardWebDecisionRuntimePreflight { config, subject })
+    }
+
+    fn compose_with_shared_authority(
+        self,
+        authority: SharedWebRuntimeAuthority,
+        preflight: StandardWebDecisionRuntimePreflight,
+    ) -> Result<StandardWebDecisionRuntime, StandardWebDecisionRuntimeError> {
+        let StandardWebDecisionRuntimePreflight { config, subject } = preflight;
         let mut decision_loop = DecisionLoop::new(config);
         let mut executors = DecisionExecutorRegistry::new();
 
-        let request_accounting = RequestAccountingBroker::new(self.runtime_budget);
-        let requests = HttpRequestBroker::new_metered(policy, request_accounting.clone())?;
+        let knowledge = authority.knowledge();
+        let requests = authority.requests().clone();
         let profile = StandardWebDecisionProfile::new_with_request_broker(requests.clone())?;
-        let installation = profile.install(&knowledge, &mut decision_loop, &mut executors)?;
+        let installation = profile.install(knowledge, &mut decision_loop, &mut executors)?;
 
         // Surface-B multi-objective continuation: install continuation rules ONLY
         // in this runtime's adaptive pipeline. The generic AdaptivePipeline
@@ -551,25 +683,30 @@ impl StandardWebDecisionRuntimeBuilder {
         }
         let api_reasoning_installation = if self.api_reasoning_enabled {
             let profile = StandardApiReasoning::new()?;
-            Some(profile.install(&knowledge, decision_loop.rules_mut())?)
+            Some(profile.install(knowledge, decision_loop.rules_mut())?)
         } else {
             None
         };
         let http_evidence = HttpEvidenceExecutor::new_with_request_broker(
             requests.clone(),
-            Arc::new(SubjectHttpProbeProvider::new(HttpProbeMethod::Get)),
+            Arc::new(SubjectHttpProbeProvider::new(self.bootstrap_probe_method)),
         )?;
         let http_evidence = match self.payload_binding {
             Some(binding) => http_evidence.with_payload_binding(binding),
             None => http_evidence,
         };
+        let http_evidence = match self.complete_response_observer {
+            Some(observer) => http_evidence.with_complete_response_observer(observer),
+            None => http_evidence,
+        };
         executors.register(Arc::new(http_evidence))?;
 
-        let unsupported_actions = StandardWebActionKind::all()
+        let mut unsupported_actions: BTreeSet<_> = StandardWebActionKind::all()
             .into_iter()
             .filter(|kind| !executors.contains(kind.executor_id()))
             .map(|kind| kind.action_id().to_owned())
             .collect();
+        unsupported_actions.extend(self.additional_suppressed_actions);
 
         Ok(StandardWebDecisionRuntime {
             target: self.target,
@@ -577,16 +714,12 @@ impl StandardWebDecisionRuntimeBuilder {
             installation,
             api_reasoning_installation,
             unsupported_actions,
-            knowledge,
             decision_loop,
             runner: DecisionRunnerAdapter::new(executors),
             experience: self.experience,
             session: DecisionSession::new(subject),
-            budget: self.runtime_budget,
-            requests,
-            request_accounting,
+            authority,
             usage: RuntimeUsage::default(),
-            cancellation: self.cancellation,
             started: false,
         })
     }
@@ -620,16 +753,12 @@ pub struct StandardWebDecisionRuntime {
     installation: StandardWebDecisionInstallReport,
     api_reasoning_installation: Option<StandardApiInstallReport>,
     unsupported_actions: BTreeSet<String>,
-    knowledge: KnowledgeBase,
     decision_loop: DecisionLoop,
     runner: DecisionRunnerAdapter,
     experience: ExperienceStore,
     session: DecisionSession,
-    budget: RuntimeBudget,
-    requests: HttpRequestBroker,
-    request_accounting: RequestAccountingBroker,
+    authority: SharedWebRuntimeAuthority,
     usage: RuntimeUsage,
-    cancellation: CancellationToken,
     started: bool,
 }
 
@@ -666,7 +795,7 @@ impl StandardWebDecisionRuntime {
 
     /// Returns the runtime knowledge base for audit and reporting.
     pub fn knowledge(&self) -> &KnowledgeBase {
-        &self.knowledge
+        self.authority.knowledge()
     }
 
     /// Returns learned target-scoped outcomes.
@@ -681,7 +810,7 @@ impl StandardWebDecisionRuntime {
 
     /// Returns the immutable resource envelope for this session.
     pub const fn budget(&self) -> RuntimeBudget {
-        self.budget
+        self.authority.budget()
     }
 
     /// Returns current resource accounting, including failed request attempts.
@@ -694,7 +823,7 @@ impl StandardWebDecisionRuntime {
     /// Cancelling the returned token stops this single-use runtime at its next
     /// async or deterministic planning boundary.
     pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
+        self.authority.cancellation_token()
     }
 
     /// Returns whether execution has been attempted.
@@ -719,11 +848,12 @@ impl StandardWebDecisionRuntime {
             return Err(StandardWebDecisionRuntimeError::AlreadyStarted);
         }
         self.started = true;
-        let started_at = tokio::time::Instant::now();
-        let deadline = started_at.checked_add(self.budget.max_wall_time());
+        let timing = self.authority.start();
+        let started_at = timing.started_at();
+        let deadline = timing.deadline();
         let mut turns = Vec::new();
 
-        if self.cancellation.is_cancelled() {
+        if self.authority.cancellation().is_cancelled() {
             return Ok(self.cancellation_report(None, turns, None, started_at));
         }
 
@@ -759,21 +889,21 @@ impl StandardWebDecisionRuntime {
         ) {
             Ok(limits) => limits,
             Err(limit) => {
-                if self.cancellation.is_cancelled() {
+                if self.authority.cancellation().is_cancelled() {
                     return Ok(self.cancellation_report(None, turns, None, started_at));
                 }
                 return Ok(self.limit_report(None, turns, limit, started_at));
             },
         };
-        if self.cancellation.is_cancelled() {
+        if self.authority.cancellation().is_cancelled() {
             return Ok(self.cancellation_report(None, turns, None, started_at));
         }
         let bootstrap_result = await_execution(
-            &self.cancellation,
+            self.authority.cancellation(),
             deadline,
             self.runner.execute_command_with_limits(
                 &bootstrap_command,
-                &self.knowledge,
+                self.authority.knowledge(),
                 bootstrap_limits,
             ),
         )
@@ -815,7 +945,7 @@ impl StandardWebDecisionRuntime {
         }
         let bootstrap = Some(bootstrap);
 
-        if self.cancellation.is_cancelled() {
+        if self.authority.cancellation().is_cancelled() {
             return Ok(self.cancellation_report(bootstrap, turns, None, started_at));
         }
 
@@ -828,14 +958,14 @@ impl StandardWebDecisionRuntime {
         let terminal = loop {
             match &command {
                 DecisionLoopCommand::Replan => {
-                    if self.cancellation.is_cancelled() {
+                    if self.authority.cancellation().is_cancelled() {
                         return Ok(self.cancellation_report(bootstrap, turns, None, started_at));
                     }
                     if let Some(limit) = self.wall_limit_if_reached(started_at) {
                         return Ok(self.limit_report(bootstrap, turns, limit, started_at));
                     }
                     let planning = match self.decision_loop.plan_next_with_suppressed_actions(
-                        &self.knowledge,
+                        self.authority.knowledge(),
                         &self.experience,
                         &mut self.session,
                         &self.unsupported_actions,
@@ -852,7 +982,7 @@ impl StandardWebDecisionRuntime {
                     };
                     command = planning.command().clone();
                     turns.push(StandardWebDecisionRuntimeTurn::Planning(Box::new(planning)));
-                    if self.cancellation.is_cancelled() {
+                    if self.authority.cancellation().is_cancelled() {
                         return Ok(self.cancellation_report(bootstrap, turns, None, started_at));
                     }
                     if is_terminal(&command) {
@@ -864,7 +994,7 @@ impl StandardWebDecisionRuntime {
                 },
                 DecisionLoopCommand::ExecuteAction { .. }
                 | DecisionLoopCommand::CollectActiveEvidence { .. } => {
-                    if self.cancellation.is_cancelled() {
+                    if self.authority.cancellation().is_cancelled() {
                         return Ok(self.cancellation_report(bootstrap, turns, None, started_at));
                     }
                     let (action_id, previous_stage) = match execution_metadata(&command) {
@@ -893,7 +1023,7 @@ impl StandardWebDecisionRuntime {
                     ) {
                         Ok(limits) => limits,
                         Err(limit) => {
-                            if self.cancellation.is_cancelled() {
+                            if self.authority.cancellation().is_cancelled() {
                                 return Ok(
                                     self.cancellation_report(bootstrap, turns, None, started_at)
                                 );
@@ -901,15 +1031,15 @@ impl StandardWebDecisionRuntime {
                             return Ok(self.limit_report(bootstrap, turns, limit, started_at));
                         },
                     };
-                    if self.cancellation.is_cancelled() {
+                    if self.authority.cancellation().is_cancelled() {
                         return Ok(self.cancellation_report(bootstrap, turns, None, started_at));
                     }
                     let evidence_result = await_execution(
-                        &self.cancellation,
+                        self.authority.cancellation(),
                         deadline,
                         self.runner.execute_session_command_with_limits(
                             &command,
-                            &self.knowledge,
+                            self.authority.knowledge(),
                             &self.session,
                             limits,
                         ),
@@ -959,7 +1089,7 @@ impl StandardWebDecisionRuntime {
                             ));
                         }
                     }
-                    if self.cancellation.is_cancelled() {
+                    if self.authority.cancellation().is_cancelled() {
                         return Ok(self.cancellation_report(
                             bootstrap,
                             turns,
@@ -970,7 +1100,7 @@ impl StandardWebDecisionRuntime {
                     let runner_turn = self.runner.resume_session_command_with_suppressed_actions(
                         &self.decision_loop,
                         &command,
-                        &self.knowledge,
+                        self.authority.knowledge(),
                         &mut self.experience,
                         &mut self.session,
                         evidence,
@@ -995,7 +1125,7 @@ impl StandardWebDecisionRuntime {
                             if is_terminal(&command) {
                                 break command.clone();
                             }
-                            if self.cancellation.is_cancelled() {
+                            if self.authority.cancellation().is_cancelled() {
                                 return Ok(
                                     self.cancellation_report(bootstrap, turns, None, started_at)
                                 );
@@ -1018,18 +1148,20 @@ impl StandardWebDecisionRuntime {
                             if is_terminal(&command) {
                                 break command.clone();
                             }
-                            if self.cancellation.is_cancelled() {
+                            if self.authority.cancellation().is_cancelled() {
                                 return Ok(
                                     self.cancellation_report(bootstrap, turns, None, started_at)
                                 );
                             }
                             if self.usage.consecutive_no_progress_turns()
-                                >= self.budget.max_consecutive_no_progress_turns()
+                                >= self.authority.budget().max_consecutive_no_progress_turns()
                                 && !progressed
                             {
                                 let limit = RuntimeLimitExceeded::new(
                                     RuntimeBudgetDimension::ConsecutiveNoProgressTurns,
-                                    u64::from(self.budget.max_consecutive_no_progress_turns()),
+                                    u64::from(
+                                        self.authority.budget().max_consecutive_no_progress_turns(),
+                                    ),
                                     u64::from(self.usage.consecutive_no_progress_turns()),
                                     Some(completed_action_id),
                                 );
@@ -1064,7 +1196,7 @@ impl StandardWebDecisionRuntime {
             unverified_evidence: None,
             terminal,
             usage: self.usage.clone(),
-            transport: self.request_accounting.dispatch_audit(),
+            transport: self.authority.request_accounting().dispatch_audit(),
             limit_exceeded: None,
             execution_failure: None,
         })
@@ -1117,7 +1249,7 @@ impl StandardWebDecisionRuntime {
                 bootstrap,
                 completed_turns,
                 usage: self.usage.clone(),
-                transport: self.request_accounting.dispatch_audit(),
+                transport: self.authority.request_accounting().dispatch_audit(),
             }),
             source: Box::new(source),
         }
@@ -1140,7 +1272,10 @@ impl StandardWebDecisionRuntime {
         match execution_class {
             DecisionExecutionClass::TransportBound => {
                 self.sync_request_accounting();
-                let preflight = self.request_accounting.preflight(action_id, stage)?;
+                let preflight = self
+                    .authority
+                    .request_accounting()
+                    .preflight(action_id, stage)?;
                 self.reserve_action_attempt(action_id)?;
                 Ok(DecisionExecutionLimits::new()
                     .with_max_response_body_bytes(preflight.remaining_response_bytes()))
@@ -1156,10 +1291,10 @@ impl StandardWebDecisionRuntime {
     /// applies to every execution class.
     fn reserve_action_attempt(&mut self, action_id: &str) -> Result<(), RuntimeLimitExceeded> {
         let attempts = self.usage.same_action_attempts(action_id);
-        if attempts >= self.budget.max_same_action_attempts() {
+        if attempts >= self.authority.budget().max_same_action_attempts() {
             return Err(RuntimeLimitExceeded::new(
                 RuntimeBudgetDimension::SameActionAttempts,
-                u64::from(self.budget.max_same_action_attempts()),
+                u64::from(self.authority.budget().max_same_action_attempts()),
                 u64::from(attempts).saturating_add(1),
                 Some(action_id.to_owned()),
             ));
@@ -1207,10 +1342,10 @@ impl StandardWebDecisionRuntime {
     fn response_limit_if_exceeded(&mut self, action_id: &str) -> Option<RuntimeLimitExceeded> {
         self.sync_request_accounting();
         let observed = self.usage.response_bytes();
-        (observed > self.budget.max_response_bytes()).then(|| {
+        (observed > self.authority.budget().max_response_bytes()).then(|| {
             RuntimeLimitExceeded::new(
                 RuntimeBudgetDimension::ResponseBytes,
-                self.budget.max_response_bytes(),
+                self.authority.budget().max_response_bytes(),
                 observed,
                 Some(action_id.to_owned()),
             )
@@ -1219,7 +1354,7 @@ impl StandardWebDecisionRuntime {
 
     fn sync_request_accounting(&mut self) {
         self.usage
-            .sync_request_accounting(self.request_accounting.snapshot());
+            .sync_request_accounting(self.authority.request_accounting().snapshot());
     }
 
     fn refresh_elapsed(&mut self, started_at: tokio::time::Instant) {
@@ -1232,15 +1367,18 @@ impl StandardWebDecisionRuntime {
         started_at: tokio::time::Instant,
     ) -> Option<RuntimeLimitExceeded> {
         self.refresh_elapsed(started_at);
-        (started_at.elapsed() >= self.budget.max_wall_time()).then(|| self.wall_limit(started_at))
+        (started_at.elapsed() >= self.authority.budget().max_wall_time())
+            .then(|| self.wall_limit(started_at))
     }
 
     fn wall_limit(&mut self, started_at: tokio::time::Instant) -> RuntimeLimitExceeded {
         self.refresh_elapsed(started_at);
         RuntimeLimitExceeded::new(
             RuntimeBudgetDimension::WallTime,
-            self.budget.max_wall_time_ms(),
-            self.usage.elapsed_ms().max(self.budget.max_wall_time_ms()),
+            self.authority.budget().max_wall_time_ms(),
+            self.usage
+                .elapsed_ms()
+                .max(self.authority.budget().max_wall_time_ms()),
             None,
         )
     }
@@ -1273,7 +1411,7 @@ impl StandardWebDecisionRuntime {
                 reason: crate::DecisionStopReason::RuntimeBudgetLimit,
             },
             usage: self.usage.clone(),
-            transport: self.request_accounting.dispatch_audit(),
+            transport: self.authority.request_accounting().dispatch_audit(),
             limit_exceeded: Some(limit),
             execution_failure,
         }
@@ -1297,7 +1435,7 @@ impl StandardWebDecisionRuntime {
                 reason: crate::DecisionStopReason::RuntimeBudgetLimit,
             },
             usage: self.usage.clone(),
-            transport: self.request_accounting.dispatch_audit(),
+            transport: self.authority.request_accounting().dispatch_audit(),
             limit_exceeded: Some(limit),
             execution_failure: None,
         }
@@ -1320,7 +1458,7 @@ impl StandardWebDecisionRuntime {
                 reason: crate::DecisionStopReason::CancelledByHost,
             },
             usage: self.usage.clone(),
-            transport: self.request_accounting.dispatch_audit(),
+            transport: self.authority.request_accounting().dispatch_audit(),
             limit_exceeded: None,
             execution_failure: None,
         }

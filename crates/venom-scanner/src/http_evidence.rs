@@ -33,10 +33,12 @@ use crate::{
         PayloadSeed, PayloadStrategyLimits, PayloadStrategyRef, PayloadStrategyRegistry,
         PayloadVariantRole,
     },
-    runtime_budget::RequestAccountingBroker,
     DecisionActionExecutor, DecisionExecutionFailureKind, DecisionExecutionRequest,
     DecisionExecutionStage, DecisionExecutorError,
 };
+
+#[cfg(test)]
+use crate::runtime_budget::RequestAccountingBroker;
 
 mod form_controls;
 mod request_broker;
@@ -282,6 +284,45 @@ impl HttpEvidencePolicy {
         Self::new([origin], Duration::from_secs(15), DEFAULT_HTTP_BODY_LIMIT)
     }
 
+    /// Returns this policy narrowed to the exact origin of `target`.
+    ///
+    /// All non-scope settings are preserved. The target must already be covered
+    /// by this policy, so narrowing can never turn an unauthorized target into
+    /// an authorized one. Bounded origin-level runtimes use this seam to ensure
+    /// that an explicitly broader host policy cannot silently expand discovery.
+    pub(crate) fn restricted_to_exact_origin(
+        &self,
+        target: &Url,
+    ) -> Result<Self, HttpEvidenceError> {
+        self.require_permitted_target(target)?;
+
+        let mut restricted = self.clone();
+        restricted.allowed_origins = BTreeSet::from([origin(target)?]);
+        Ok(restricted)
+    }
+
+    /// Narrows a policy for the names-only assessment observer.
+    ///
+    /// The assessment is never allowed to inherit text sampling or a
+    /// caller-added sensitive response header. The response body remains
+    /// transient inside the sealed executor observer. No raw response header
+    /// value enters assessment discovery evidence; normalized media type has
+    /// its own bounded predicate.
+    pub(crate) fn restricted_for_web_assessment(
+        &self,
+        target: &Url,
+        max_body_bytes: usize,
+    ) -> Result<Self, HttpEvidenceError> {
+        validate_body_limit(max_body_bytes)?;
+        let mut restricted = self.restricted_to_exact_origin(target)?;
+        restricted.max_body_bytes = restricted.max_body_bytes.min(max_body_bytes);
+        restricted.body_capture = HttpBodyCapture::MetadataOnly;
+        // Even Content-Type parameters are untrusted and may contain tokens.
+        // Discovery uses only RESPONSE_MEDIA_TYPE's normalized essence.
+        restricted.captured_headers.clear();
+        Ok(restricted)
+    }
+
     /// Configures optional bounded text sampling.
     pub fn with_body_capture(
         mut self,
@@ -361,6 +402,20 @@ impl HttpEvidencePolicy {
 
     fn permits(&self, url: &Url) -> Result<bool, HttpEvidenceError> {
         Ok(self.allowed_origins.contains(&origin(url)?))
+    }
+
+    /// Validates the complete request URL and enforces this policy's scope.
+    ///
+    /// Callers must use this typed seam instead of comparing serialized origins:
+    /// origin equality alone does not reject unsupported schemes or embedded
+    /// credentials.
+    pub(crate) fn require_permitted_target(&self, target: &Url) -> Result<(), HttpEvidenceError> {
+        if !self.permits(target)? {
+            return Err(HttpEvidenceError::TargetOutsidePolicy {
+                url: target.to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -478,6 +533,11 @@ pub enum HttpEvidenceError {
     /// Core reasoning values could not be constructed.
     #[error("failed to construct HTTP evidence: {0}")]
     Reasoning(#[from] venom_core::ReasoningModelError),
+
+    /// The sealed assessment observer did not receive its required non-secret
+    /// base evidence identities.
+    #[error("HTTP assessment observer invariant failed: {invariant}")]
+    AssessmentObserverInvariant { invariant: &'static str },
 }
 
 pub(crate) fn execution_failure_kind(error: &HttpEvidenceError) -> DecisionExecutionFailureKind {
@@ -508,7 +568,10 @@ pub(crate) fn execution_failure_kind(error: &HttpEvidenceError) -> DecisionExecu
         | HttpEvidenceError::PayloadStrategyUnavailable { .. }
         | HttpEvidenceError::PayloadDerivationFailed { .. }
         | HttpEvidenceError::Client(_)
-        | HttpEvidenceError::Reasoning(_) => DecisionExecutionFailureKind::ExecutorFailure,
+        | HttpEvidenceError::Reasoning(_)
+        | HttpEvidenceError::AssessmentObserverInvariant { .. } => {
+            DecisionExecutionFailureKind::ExecutorFailure
+        },
     }
 }
 
@@ -657,6 +720,7 @@ pub struct HttpEvidenceExecutor {
     probes: Arc<dyn HttpProbeProvider>,
     payload: Option<HttpHeaderPayloadBinding>,
     capture_form_control_names: bool,
+    complete_response_observer: Option<Arc<dyn CompleteHttpResponseObserver>>,
 }
 
 impl HttpEvidenceExecutor {
@@ -674,7 +738,16 @@ impl HttpEvidenceExecutor {
         policy: HttpEvidencePolicy,
         probes: Arc<dyn HttpProbeProvider>,
     ) -> Result<Self, HttpEvidenceError> {
-        Self::build(id, policy, probes, None)
+        let id = validate_executor_id(id)?;
+        let requests = HttpRequestBroker::new_unmetered(policy)?;
+        Ok(Self {
+            id,
+            requests,
+            probes,
+            payload: None,
+            capture_form_control_names: false,
+            complete_response_observer: None,
+        })
     }
 
     #[cfg(test)]
@@ -693,7 +766,16 @@ impl HttpEvidenceExecutor {
         probes: Arc<dyn HttpProbeProvider>,
         accounting: RequestAccountingBroker,
     ) -> Result<Self, HttpEvidenceError> {
-        Self::build(id, policy, probes, Some(accounting))
+        let id = validate_executor_id(id)?;
+        let requests = HttpRequestBroker::new_metered(policy, accounting)?;
+        Ok(Self {
+            id,
+            requests,
+            probes,
+            payload: None,
+            capture_form_control_names: false,
+            complete_response_observer: None,
+        })
     }
 
     pub(crate) fn new_with_request_broker(
@@ -715,26 +797,7 @@ impl HttpEvidenceExecutor {
             probes,
             payload: None,
             capture_form_control_names: false,
-        })
-    }
-
-    fn build(
-        id: impl Into<String>,
-        policy: HttpEvidencePolicy,
-        probes: Arc<dyn HttpProbeProvider>,
-        accounting: Option<RequestAccountingBroker>,
-    ) -> Result<Self, HttpEvidenceError> {
-        let id = validate_executor_id(id)?;
-        let requests = match accounting {
-            Some(accounting) => HttpRequestBroker::new_metered(policy, accounting)?,
-            None => HttpRequestBroker::new_unmetered(policy)?,
-        };
-        Ok(Self {
-            id,
-            requests,
-            probes,
-            payload: None,
-            capture_form_control_names: false,
+            complete_response_observer: None,
         })
     }
 
@@ -748,6 +811,22 @@ impl HttpEvidenceExecutor {
     /// This is a deliberately narrow opt-in, not a generic extractor hook.
     pub(crate) fn with_form_control_capture(mut self) -> Self {
         self.capture_form_control_names = true;
+        self
+    }
+
+    /// Installs the crate-owned response projection seam used by the origin
+    /// assessment runtime.
+    ///
+    /// The trait and observation type are crate-private. An observer can see a
+    /// body only after the broker has observed stream EOF; partial bytes are
+    /// never exposed through this seam. Its evidence is returned in the same
+    /// executor batch as the HTTP observations, so the decision runner either
+    /// commits all of it or none of it.
+    pub(crate) fn with_complete_response_observer(
+        mut self,
+        observer: Arc<dyn CompleteHttpResponseObserver>,
+    ) -> Self {
+        self.complete_response_observer = Some(observer);
         self
     }
 
@@ -998,6 +1077,44 @@ impl HttpEvidenceExecutor {
         }
 
         append_rate_limit_evidence(self, decision, &response, &mut evidence)?;
+        if let Some(observer) = &self.complete_response_observer {
+            let media_type = normalized_media_type(&response.headers);
+            let evidence_id = |predicate: venom_core::PredicateDescriptor| {
+                let predicate = predicate.into_knowledge();
+                evidence
+                    .iter()
+                    .find(|item| item.predicate() == &predicate)
+                    .map(|item| item.id())
+            };
+            let observation = CompleteHttpResponseObservation {
+                case_id: decision.case().id(),
+                action_id: decision.case().action_id(),
+                hypothesis_id: decision.case().hypothesis_id(),
+                has_payload_strategy: decision.case().payload_strategy().is_some(),
+                applies_hypothesis_transition: decision.case().applies_hypothesis_transition(),
+                stage: decision.stage(),
+                subject: decision.case().subject(),
+                method: probe.method(),
+                requested_url: probe.url(),
+                status: response.status.as_u16(),
+                media_type: media_type.as_deref(),
+                reliability: self.policy().reliability(),
+                complete_body: response.body_complete.then_some(response.body.as_slice()),
+                request_method_evidence_id: evidence_id(HttpEvidencePredicate::REQUEST_METHOD),
+                request_url_evidence_id: evidence_id(HttpEvidencePredicate::REQUEST_URL),
+                response_status_evidence_id: evidence_id(HttpEvidencePredicate::RESPONSE_STATUS),
+                response_media_type_evidence_id: evidence_id(
+                    HttpEvidencePredicate::RESPONSE_MEDIA_TYPE,
+                ),
+                response_body_truncated_evidence_id: evidence_id(
+                    HttpEvidencePredicate::RESPONSE_BODY_TRUNCATED,
+                ),
+                response_body_digest_evidence_id: evidence_id(
+                    HttpEvidencePredicate::RESPONSE_BODY_SHA256,
+                ),
+            };
+            evidence.extend(observer.observe(observation)?);
+        }
         Ok(evidence)
     }
 
@@ -1044,6 +1161,181 @@ impl DecisionActionExecutor for HttpEvidenceExecutor {
     }
 }
 
+/// Sealed response projection boundary for crate-owned bounded runtimes.
+///
+/// This trait is intentionally not public. In particular, it is not a generic
+/// host callback that could retain response bodies or mutate transport policy.
+mod complete_response_observer_seal {
+    pub(super) trait Sealed {}
+
+    impl Sealed for crate::web_assessment::AssessmentDiscoveryObserver {}
+}
+
+#[allow(private_bounds)]
+pub(crate) trait CompleteHttpResponseObserver:
+    complete_response_observer_seal::Sealed + Send + Sync
+{
+    /// Derives safe evidence from one response. `complete_body()` returns bytes
+    /// only when the broker observed stream EOF.
+    fn observe(
+        &self,
+        observation: CompleteHttpResponseObservation<'_>,
+    ) -> Result<Vec<Evidence>, HttpEvidenceError>;
+}
+
+/// Borrowed response view that never exposes a partial body.
+pub(crate) struct CompleteHttpResponseObservation<'a> {
+    case_id: &'a str,
+    action_id: &'a str,
+    hypothesis_id: &'a str,
+    has_payload_strategy: bool,
+    applies_hypothesis_transition: bool,
+    stage: DecisionExecutionStage,
+    subject: &'a venom_core::EntityId,
+    method: HttpProbeMethod,
+    requested_url: &'a Url,
+    status: u16,
+    media_type: Option<&'a str>,
+    reliability: ConfidenceScore,
+    complete_body: Option<&'a [u8]>,
+    request_method_evidence_id: Option<&'a venom_core::EvidenceId>,
+    request_url_evidence_id: Option<&'a venom_core::EvidenceId>,
+    response_status_evidence_id: Option<&'a venom_core::EvidenceId>,
+    response_media_type_evidence_id: Option<&'a venom_core::EvidenceId>,
+    response_body_truncated_evidence_id: Option<&'a venom_core::EvidenceId>,
+    response_body_digest_evidence_id: Option<&'a venom_core::EvidenceId>,
+}
+
+impl CompleteHttpResponseObservation<'_> {
+    pub(crate) const fn case_id(&self) -> &str {
+        self.case_id
+    }
+
+    pub(crate) const fn action_id(&self) -> &str {
+        self.action_id
+    }
+
+    pub(crate) const fn hypothesis_id(&self) -> &str {
+        self.hypothesis_id
+    }
+
+    pub(crate) const fn has_payload_strategy(&self) -> bool {
+        self.has_payload_strategy
+    }
+
+    pub(crate) const fn applies_hypothesis_transition(&self) -> bool {
+        self.applies_hypothesis_transition
+    }
+
+    pub(crate) const fn stage(&self) -> DecisionExecutionStage {
+        self.stage
+    }
+
+    pub(crate) const fn subject(&self) -> &venom_core::EntityId {
+        self.subject
+    }
+
+    pub(crate) const fn method(&self) -> HttpProbeMethod {
+        self.method
+    }
+
+    pub(crate) const fn requested_url(&self) -> &Url {
+        self.requested_url
+    }
+
+    pub(crate) const fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub(crate) fn media_type(&self) -> Option<&str> {
+        self.media_type
+    }
+
+    pub(crate) const fn reliability(&self) -> ConfidenceScore {
+        self.reliability
+    }
+
+    pub(crate) const fn complete_body(&self) -> Option<&[u8]> {
+        self.complete_body
+    }
+
+    pub(crate) const fn request_method_evidence_id(&self) -> Option<&venom_core::EvidenceId> {
+        self.request_method_evidence_id
+    }
+
+    pub(crate) const fn request_url_evidence_id(&self) -> Option<&venom_core::EvidenceId> {
+        self.request_url_evidence_id
+    }
+
+    pub(crate) const fn response_status_evidence_id(&self) -> Option<&venom_core::EvidenceId> {
+        self.response_status_evidence_id
+    }
+
+    pub(crate) const fn response_media_type_evidence_id(&self) -> Option<&venom_core::EvidenceId> {
+        self.response_media_type_evidence_id
+    }
+
+    pub(crate) const fn response_body_truncated_evidence_id(
+        &self,
+    ) -> Option<&venom_core::EvidenceId> {
+        self.response_body_truncated_evidence_id
+    }
+
+    pub(crate) const fn response_body_digest_evidence_id(&self) -> Option<&venom_core::EvidenceId> {
+        self.response_body_digest_evidence_id
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct CompleteHttpResponseObservationTestInput<'a> {
+    pub(crate) case_id: &'a str,
+    pub(crate) action_id: &'a str,
+    pub(crate) hypothesis_id: &'a str,
+    pub(crate) has_payload_strategy: bool,
+    pub(crate) applies_hypothesis_transition: bool,
+    pub(crate) stage: DecisionExecutionStage,
+    pub(crate) subject: &'a venom_core::EntityId,
+    pub(crate) method: HttpProbeMethod,
+    pub(crate) requested_url: &'a Url,
+    pub(crate) status: u16,
+    pub(crate) media_type: Option<&'a str>,
+    pub(crate) reliability: ConfidenceScore,
+    pub(crate) complete_body: Option<&'a [u8]>,
+    pub(crate) request_method_evidence_id: Option<&'a venom_core::EvidenceId>,
+    pub(crate) request_url_evidence_id: Option<&'a venom_core::EvidenceId>,
+    pub(crate) response_status_evidence_id: Option<&'a venom_core::EvidenceId>,
+    pub(crate) response_media_type_evidence_id: Option<&'a venom_core::EvidenceId>,
+    pub(crate) response_body_truncated_evidence_id: Option<&'a venom_core::EvidenceId>,
+    pub(crate) response_body_digest_evidence_id: Option<&'a venom_core::EvidenceId>,
+}
+
+#[cfg(test)]
+pub(crate) fn complete_http_response_observation_for_test<'a>(
+    input: CompleteHttpResponseObservationTestInput<'a>,
+) -> CompleteHttpResponseObservation<'a> {
+    CompleteHttpResponseObservation {
+        case_id: input.case_id,
+        action_id: input.action_id,
+        hypothesis_id: input.hypothesis_id,
+        has_payload_strategy: input.has_payload_strategy,
+        applies_hypothesis_transition: input.applies_hypothesis_transition,
+        stage: input.stage,
+        subject: input.subject,
+        method: input.method,
+        requested_url: input.requested_url,
+        status: input.status,
+        media_type: input.media_type,
+        reliability: input.reliability,
+        complete_body: input.complete_body,
+        request_method_evidence_id: input.request_method_evidence_id,
+        request_url_evidence_id: input.request_url_evidence_id,
+        response_status_evidence_id: input.response_status_evidence_id,
+        response_media_type_evidence_id: input.response_media_type_evidence_id,
+        response_body_truncated_evidence_id: input.response_body_truncated_evidence_id,
+        response_body_digest_evidence_id: input.response_body_digest_evidence_id,
+    }
+}
+
 pub(crate) struct CollectedHttpResponse {
     status: StatusCode,
     final_url: Url,
@@ -1051,6 +1343,7 @@ pub(crate) struct CollectedHttpResponse {
     headers: HeaderMap,
     body: Vec<u8>,
     body_truncated: bool,
+    body_complete: bool,
     ttfb_ms: u64,
     total_ms: u64,
 }
@@ -1343,10 +1636,13 @@ fn append_rate_limit_evidence(
         let Some((header, raw)) = selected else {
             continue;
         };
-        let value = raw
-            .parse::<u64>()
-            .map(EvidenceValue::Unsigned)
-            .unwrap_or_else(|_| EvidenceValue::Text(raw));
+        let value = match raw.parse::<u64>() {
+            Ok(value) => EvidenceValue::Unsigned(value),
+            Err(_) if executor.policy().captured_headers().contains(header) => {
+                EvidenceValue::Text(raw)
+            },
+            Err(_) => continue,
+        };
         evidence.push(executor.observation(
             decision,
             EvidenceKind::RateLimit,
