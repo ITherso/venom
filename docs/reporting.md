@@ -218,6 +218,94 @@ The [development report-bundle example](examples/report-bundle/README.md)
 records one local loopback run, exact payload hashes, and an offline
 self-comparison without relabelling it as release or effectiveness evidence.
 
+## Offline report-bundle verification
+
+Development `0.10.0-alpha.2` source that includes Report Bundle Verification
+V1 can check a saved bundle without starting a scan:
+
+```bash
+# Human-readable result (the default).
+termivar report verify --dir ./assessment-001
+
+# One bounded structured result on stdout.
+termivar report verify --dir ./assessment-001 --format json
+```
+
+The verifier accepts one explicit directory and the strict
+`termivar-report-bundle/v1` layout only:
+
+```text
+assessment-001/
+  assessment.html
+  assessment.json
+  manifest.json
+```
+
+It rejects missing or additional entries and does not recurse. Manifest names
+are validated against the two fixed payload names rather than treated as paths.
+The command reads the manifest within its 64 KiB limit and each payload within
+the existing 16 MiB report limit. It checks the fixed formats and media types,
+measures and hashes the exact bytes captured from each opened payload, validates
+`assessment.json` through the existing display-only assessment importer, and
+compares its completed profile, subject count, and item count with the manifest.
+HTML is checked only for bounded UTF-8 bytes, length, and digest; it is never
+launched, rendered, or executed.
+
+The result schema is `termivar-report-verification/v1`. Its checks distinguish
+`checked_matched`, `checked_mismatched`, and `not_checked`; a failure that stops
+the pipeline cannot make a dependent check look successful. `integrity_match`
+means only that the supported layout, manifest contract, captured payload bytes,
+and assessment JSON summary matched during that invocation. `not_verified`
+uses bounded reason codes such as `missing_manifest`,
+`payload_digest_mismatch`, or `assessment_summary_mismatch` without echoing
+document contents or absolute paths.
+
+Exit `0` means every supported check completed and matched. Exit `1` means the
+bundle was incomplete, unreadable, unsupported, mismatched, or otherwise could
+not be verified. Invalid command syntax exits `2` through Clap. After valid
+argument parsing, both an integrity match and an ordinary verification failure
+produce exactly one text or JSON result on stdout. An output-write failure is a
+separate nonzero error because the CLI cannot guarantee that the result reached
+the caller completely.
+
+Verification is read-only application behavior: it initializes no scanner,
+network client, credential source, or provider, and it does not write, repair,
+remove, rename, or change permissions inside the bundle. Filesystem access-time
+metadata remains outside that application-level promise. A caller-selected
+mounted filesystem may still be remotely backed; "offline" means the command
+itself issues no network requests. The bundle must be quiescent beneath trusted
+parent directories. The command rejects a
+symlink/reparse-point final directory and non-regular payloads, retaining and
+validating opened handles; this does not establish whole-path containment when
+an untrusted actor can replace parent components, or establish provenance for a
+regular hard link. Hashing and assessment parsing use the same captured payload
+bytes, but verification is not an atomic snapshot and cannot guarantee that the
+directory remains unchanged afterward or detect every concurrent same-size
+in-place write.
+
+Matching hashes are integrity metadata, not a signature. Verification does not
+establish producer/source authenticity, the validity or authorization scope of
+the original scan, finding accuracy, remediation, HTML-to-JSON semantic
+equivalence, or executable HTML safety. An editor can modify a payload and its
+manifest consistently and still receive `integrity_match`; authenticity remains
+`not_established`.
+
+After verification, the same validated bundle JSON can be used by the existing
+offline comparison command without conversion:
+
+```bash
+termivar report compare \
+  --before assessment-001/assessment.json \
+  --after assessment-002/assessment.json \
+  --same-scope
+```
+
+Both report commands are offline document operations, but they answer different
+questions: verification checks one bundle's supported internal consistency;
+comparison groups imported observations from two operator-selected reports.
+Neither certifies security or remediation. The published `v0.10.0-alpha.1`
+archives do not contain `report verify`.
+
 ## Offline assessment report comparison
 
 `termivar report compare` reads exactly two explicit local files and performs

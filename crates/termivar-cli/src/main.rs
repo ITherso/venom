@@ -26,6 +26,7 @@ mod auth_input;
 mod decision_scan;
 mod report_bundle;
 mod report_compare;
+mod report_verify;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, path::PathBuf};
@@ -497,7 +498,7 @@ enum Commands {
     /// Run the bounded deterministic scanner against an authorized origin.
     #[command(visible_alias = "decision-scan")]
     Scan(Box<ScanArgs>),
-    /// Compare two saved assessment reports offline; no scan is performed.
+    /// Inspect saved assessment reports offline; no scan is performed.
     Report {
         #[command(subcommand)]
         command: report_compare::ReportCommands,
@@ -1137,12 +1138,13 @@ fn legacy_disposition(disposition: OutcomeStatus) -> &'static str {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     if let Some(Commands::Report { command }) = cli.command {
-        return report_compare::run(command).map_err(Into::into);
+        return report_compare::run(command);
     }
-    run_existing_command(cli.command)
+    run_existing_command(cli.command)?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 #[tokio::main]

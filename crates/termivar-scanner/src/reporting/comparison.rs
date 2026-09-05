@@ -54,6 +54,50 @@ pub enum ComparisonError {
     Serialization,
 }
 
+/// Bounded, display-only metadata imported from one supported assessment.
+///
+/// This summary proves only that the supplied bytes satisfy the current
+/// rendered-assessment wire contract. It does not authenticate the producer,
+/// establish target scope, or create runtime evidence or assessment authority.
+/// The fields remain private and this type intentionally implements neither
+/// `Serialize` nor `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImportedAssessmentSummary {
+    schema: String,
+    profile: String,
+    status: String,
+    subject_count: u64,
+    item_count: u64,
+}
+
+impl ImportedAssessmentSummary {
+    /// Returns the exact supported rendered-assessment schema identifier.
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// Returns the validated profile declared by the imported document.
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Returns the validated completion status declared by the document.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Returns the bounded declared subject count.
+    pub const fn subject_count(&self) -> u64 {
+        self.subject_count
+    }
+
+    /// Returns the bounded declared assessment-item count.
+    pub const fn item_count(&self) -> u64 {
+        self.item_count
+    }
+}
+
 impl fmt::Display for ComparisonError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -99,6 +143,25 @@ pub fn compare_reports(
 ) -> Result<String, ComparisonError> {
     let document = compare_documents(import::parse(before)?, import::parse(after)?)?;
     render(&document, format, super::MAX_RENDERED_REPORT_BYTES)
+}
+
+/// Imports one complete rendered assessment into a narrow display-only summary.
+///
+/// Parsing uses the same strict byte, nesting, duplicate-key, field, item, and
+/// optional-audit validation as [`compare_reports`]. No authoritative runtime
+/// model is deserialized or constructed, and no raw item or audit content is
+/// exposed to the caller.
+pub fn import_assessment_summary(
+    bytes: &[u8],
+) -> Result<ImportedAssessmentSummary, ComparisonError> {
+    let imported = import::parse(bytes)?;
+    Ok(ImportedAssessmentSummary {
+        schema: imported.metadata.schema,
+        profile: imported.metadata.profile,
+        status: imported.metadata.status,
+        subject_count: imported.metadata.subject_count,
+        item_count: imported.metadata.item_count,
+    })
 }
 
 #[derive(Debug, Serialize)]

@@ -149,6 +149,7 @@ const REQUIRED_CLI_DEPENDENCIES: &[&str] = &[
     "clap",
     "libc",
     "same-file",
+    "semver",
     "serde",
     "serde_json",
     "sha2",
@@ -900,7 +901,7 @@ pub(super) fn check(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>
         REQUIRED_CLI_DEPENDENCIES,
         OPTIONAL_CLI_DEPENDENCIES,
     ));
-    for dependency in ["same-file", "sha2"] {
+    for dependency in ["same-file", "semver", "sha2"] {
         violations.extend(exact_dependency_contract_violations(
             "termivar-cli",
             &cli_dependencies,
@@ -12025,6 +12026,7 @@ mod tests {
             "clap",
             "libc",
             "same-file",
+            "semver",
             "serde",
             "serde_json",
             "sha2",

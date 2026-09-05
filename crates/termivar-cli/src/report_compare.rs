@@ -2,9 +2,11 @@
 //! engine receives bytes only; this module has no scanner or network caller.
 
 use std::{
+    error::Error,
     fmt,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -18,6 +20,8 @@ const MAX_INPUT_BYTES: usize = MAX_COMPARISON_INPUT_BYTES;
 pub(crate) enum ReportCommands {
     /// Compare saved reports; --same-scope is your assertion, not a verified match.
     Compare(ReportCompareArgs),
+    /// Verify one saved bundle offline without scanning, launching HTML, or modifying files.
+    Verify(crate::report_verify::ReportVerifyArgs),
 }
 
 #[derive(Args)]
@@ -102,8 +106,17 @@ impl fmt::Debug for ReportCompareError {
 
 impl std::error::Error for ReportCompareError {}
 
-pub(crate) fn run(command: ReportCommands) -> Result<(), ReportCompareError> {
-    let ReportCommands::Compare(args) = command;
+pub(crate) fn run(command: ReportCommands) -> Result<ExitCode, Box<dyn Error>> {
+    match command {
+        ReportCommands::Compare(args) => {
+            run_compare(args)?;
+            Ok(ExitCode::SUCCESS)
+        },
+        ReportCommands::Verify(args) => crate::report_verify::run(args).map_err(Into::into),
+    }
+}
+
+fn run_compare(args: ReportCompareArgs) -> Result<(), ReportCompareError> {
     let rendered = render(&args)?;
     match args.output {
         Some(path) => crate::write_report_atomically(&path, rendered.as_bytes())
@@ -134,7 +147,7 @@ fn render(args: &ReportCompareArgs) -> Result<String, ReportCompareError> {
     compare_reports(&before, &after, args.format.into()).map_err(ReportCompareError::Comparison)
 }
 
-fn validate_local_path(path: &Path) -> Result<(), ReportCompareError> {
+pub(crate) fn validate_local_path(path: &Path) -> Result<(), ReportCompareError> {
     let bytes = path.as_os_str().as_encoded_bytes();
     let has_scheme_or_stream = bytes.iter().enumerate().any(|(index, byte)| {
         *byte == b':'
@@ -436,7 +449,7 @@ mod tests {
         invocation.format = CliComparisonFormat::Json;
         invocation.output = Some(output.clone());
         assert!(tokio::runtime::Handle::try_current().is_err());
-        run(ReportCommands::Compare(invocation)).unwrap();
+        run_compare(invocation).unwrap();
         assert!(tokio::runtime::Handle::try_current().is_err());
         let document: serde_json::Value =
             serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
@@ -455,7 +468,7 @@ mod tests {
         fs::write(&after, b"PRIVATE-DOCUMENT").unwrap();
         let mut invocation = args(before, after);
         invocation.output = Some(output.clone());
-        let error = run(ReportCommands::Compare(invocation)).unwrap_err();
+        let error = run_compare(invocation).unwrap_err();
         assert!(matches!(error, ReportCompareError::Comparison(_)));
         assert!(!error.to_string().contains("PRIVATE"));
         assert!(!output.exists());

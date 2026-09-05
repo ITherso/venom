@@ -320,6 +320,8 @@ jobs:
         run: cargo test --locked -p termivar-cli --test report_bundle_cli
       - name: Exercise offline report comparison CLI
         run: cargo test --locked -p termivar-cli --test report_compare_cli
+      - name: Exercise offline report bundle verification CLI
+        run: cargo test --locked -p termivar-cli --test report_verify_cli
       - name: Test fixed offline comparison controls without a browser
         run: python -m unittest discover -s scripts/tests -p test_report_compare_ui.py
       - name: Exercise credential input handle and buffer contracts

@@ -5,6 +5,10 @@ const SAMPLE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../docs/examples/first-use/assessment.json"
 ));
+const BUNDLE_SAMPLE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/examples/report-bundle/assessment-001/assessment.json"
+));
 
 fn item(identity: u32) -> Value {
     json!({
@@ -73,6 +77,73 @@ fn genuine_sample_identity_raw_hashes_and_assurance_are_preserved() {
         output,
         compare_reports(SAMPLE, SAMPLE, ComparisonFormat::Json).unwrap()
     );
+}
+
+#[test]
+fn imported_summary_reuses_the_strict_parser_without_changing_comparison() {
+    let comparison = compare_reports(BUNDLE_SAMPLE, BUNDLE_SAMPLE, ComparisonFormat::Json).unwrap();
+    let summary = import_assessment_summary(BUNDLE_SAMPLE).unwrap();
+
+    assert_eq!(summary.schema(), "venom-rendered-assessment/v1");
+    assert_eq!(summary.profile(), "web-review");
+    assert_eq!(summary.status(), "complete");
+    assert_eq!(summary.subject_count(), 1);
+    assert_eq!(summary.item_count(), 4);
+    assert_eq!(
+        compare_reports(BUNDLE_SAMPLE, BUNDLE_SAMPLE, ComparisonFormat::Json).unwrap(),
+        comparison
+    );
+}
+
+#[test]
+fn imported_summary_accepts_a_complete_empty_assessment() {
+    let empty = bytes(&report(Vec::new()));
+    let summary = import_assessment_summary(&empty).unwrap();
+
+    assert_eq!(summary.schema(), "venom-rendered-assessment/v1");
+    assert_eq!(summary.profile(), "web-review");
+    assert_eq!(summary.status(), "complete");
+    assert_eq!(summary.subject_count(), 2);
+    assert_eq!(summary.item_count(), 0);
+}
+
+#[test]
+fn imported_summary_preserves_duplicate_and_unsupported_error_classes() {
+    let valid = String::from_utf8(bytes(&report(Vec::new()))).unwrap();
+    let duplicate_key = valid.replacen('{', "{\"schema\":\"venom-rendered-assessment/v1\",", 1);
+    assert_eq!(
+        import_assessment_summary(duplicate_key.as_bytes()),
+        Err(ComparisonError::InvalidJson)
+    );
+
+    let mut duplicate_identity = report(vec![item(1), item(1)]);
+    duplicate_identity["item_count"] = json!(2);
+    assert_eq!(
+        import_assessment_summary(&bytes(&duplicate_identity)),
+        Err(ComparisonError::AmbiguousIdentity)
+    );
+
+    let mut unsupported = report(Vec::new());
+    unsupported["schema"] = json!("termivar-rendered-assessment/v2");
+    assert_eq!(
+        import_assessment_summary(&bytes(&unsupported)),
+        Err(ComparisonError::UnsupportedDocument)
+    );
+}
+
+#[test]
+fn imported_summary_is_deterministic_for_arbitrary_bounded_bytes() {
+    let mut state = 0x51a7_9e3d_u32;
+    for length in (0..=4096).step_by(29) {
+        let mut bytes = Vec::with_capacity(length);
+        for _ in 0..length {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bytes.push((state >> 24) as u8);
+        }
+        let first = std::panic::catch_unwind(|| import_assessment_summary(&bytes))
+            .expect("bounded assessment import must not panic");
+        assert_eq!(first, import_assessment_summary(&bytes));
+    }
 }
 
 #[test]

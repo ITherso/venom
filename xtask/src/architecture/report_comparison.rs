@@ -65,12 +65,13 @@ fn cli_violations(main: &str, comparison: &str) -> Result<Vec<String>, syn::Erro
             _ => None,
         })
         .collect();
-    let expected = r#"fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let expected = r#"fn main() -> Result<std::process::ExitCode, Box<dyn std::error::Error>> {
         let cli = Cli::parse();
         if let Some(Commands::Report { command }) = cli.command {
-            return report_compare::run(command).map_err(Into::into);
+            return report_compare::run(command);
         }
-        run_existing_command(cli.command)
+        run_existing_command(cli.command)?;
+        Ok(std::process::ExitCode::SUCCESS)
     }"#;
     let mut violations = Vec::new();
     if main_items.len() != 1
@@ -107,6 +108,14 @@ fn function_tokens(source: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn function_signature_tokens(source: &str, name: &str) -> Option<String> {
+    function_tokens(source, name).and_then(|source| {
+        let mut tokens: Vec<_> = source.parse::<TokenStream>().ok()?.into_iter().collect();
+        tokens.pop();
+        Some(tokens.into_iter().collect::<TokenStream>().to_string())
+    })
 }
 
 fn html_violations(source: &str) -> Result<Vec<String>, syn::Error> {
@@ -171,6 +180,8 @@ impl CliVisitor {
             [
                 "crate::auth_input::open_regular_file",
                 "crate::preflight_report_output",
+                "crate::report_verify::ReportVerifyArgs",
+                "crate::report_verify::run",
                 "crate::write_report_atomically",
             ]
             .contains(&joined.as_str())
@@ -183,9 +194,15 @@ impl CliVisitor {
             ]
             .contains(&joined.as_str())
         } else if root == "std" {
-            ["std::fmt", "std::io", "std::path", "std::error::Error"]
-                .iter()
-                .any(|prefix| joined == *prefix || joined.starts_with(&format!("{prefix}::")))
+            [
+                "std::fmt",
+                "std::io",
+                "std::path",
+                "std::error::Error",
+                "std::process::ExitCode",
+            ]
+            .iter()
+            .any(|prefix| joined == *prefix || joined.starts_with(&format!("{prefix}::")))
         } else {
             !root.starts_with("termivar_")
                 && !root.starts_with("venom_")
@@ -312,7 +329,9 @@ fn source_violations(relative: &str, source: &str) -> Result<Vec<String>, syn::E
             "MAX_COMPARISON_INPUT_BYTES",
             "ComparisonFormat",
             "ComparisonError",
+            "ImportedAssessmentSummary",
             "compare_reports",
+            "import_assessment_summary",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -321,19 +340,74 @@ fn source_violations(relative: &str, source: &str) -> Result<Vec<String>, syn::E
         BTreeSet::new()
     };
     if actual_public != expected_public {
-        visitor.reject("public API must remain the byte-input comparison function, formats, bounded errors, and two constants only");
+        visitor.reject("public API must remain the byte-input comparison and display-only summary functions, private-field summary, formats, bounded errors, and two constants only");
     }
     if relative == "reporting/comparison.rs" {
         let expected = "fn compare_reports(before: &[u8], after: &[u8], format: ComparisonFormat,) -> Result<String, ComparisonError> {}";
-        let signature = |source| {
-            function_tokens(source, "compare_reports").and_then(|source| {
-                let mut tokens: Vec<_> = source.parse::<TokenStream>().ok()?.into_iter().collect();
-                tokens.pop();
-                Some(tokens.into_iter().collect::<TokenStream>().to_string())
-            })
-        };
-        if signature(source) != signature(expected) {
+        if function_signature_tokens(source, "compare_reports")
+            != function_signature_tokens(expected, "compare_reports")
+        {
             visitor.reject("public compare_reports must accept exactly two byte slices plus format and return only rendered text or a bounded error");
+        }
+        let expected = "fn import_assessment_summary(bytes: &[u8],) -> Result<ImportedAssessmentSummary, ComparisonError> {}";
+        if function_signature_tokens(source, "import_assessment_summary")
+            != function_signature_tokens(expected, "import_assessment_summary")
+        {
+            visitor.reject("public import_assessment_summary must accept exactly one byte slice and return only the private-field display summary or bounded comparison error");
+        }
+        let summaries: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(item) if item.ident == "ImportedAssessmentSummary" => Some(item),
+                _ => None,
+            })
+            .collect();
+        let expected_fields = [
+            ("schema", "String"),
+            ("profile", "String"),
+            ("status", "String"),
+            ("subject_count", "u64"),
+            ("item_count", "u64"),
+        ];
+        let fields_match = summaries.len() == 1
+            && matches!(&summaries[0].fields, syn::Fields::Named(fields) if fields.named.len() == expected_fields.len() && fields.named.iter().zip(expected_fields).all(|(field, (name, ty))| {
+                field.ident.as_ref().is_some_and(|ident| ident == name)
+                    && matches!(field.vis, Visibility::Inherited)
+                    && matches!(&field.ty, syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident(ty))
+            }));
+        let contract_attributes = summaries
+            .first()
+            .map(|summary| {
+                summary
+                    .attrs
+                    .iter()
+                    .filter(|attribute| !attribute.path().is_ident("doc"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let derives_are_display_only = contract_attributes.len() == 2
+            && contract_attributes.iter().any(|attribute| {
+                matches!(&attribute.meta, syn::Meta::List(meta) if meta.path.is_ident("derive") && meta.tokens.to_string() == "Debug , Clone , PartialEq , Eq")
+            })
+            && contract_attributes
+                .iter()
+                .any(|attribute| attribute.path().is_ident("non_exhaustive"));
+        if !fields_match || !derives_are_display_only {
+            visitor.reject("ImportedAssessmentSummary must remain the exact non-serializable private-field display-only projection");
+        }
+        for (name, output, borrowed, is_const) in [
+            ("schema", "str", true, false),
+            ("profile", "str", true, false),
+            ("status", "str", true, false),
+            ("subject_count", "u64", false, true),
+            ("item_count", "u64", false, true),
+        ] {
+            if !summary_getter_is_exact(&syntax, name, output, borrowed, is_const) {
+                visitor.reject(&format!(
+                    "ImportedAssessmentSummary `{name}` getter must remain an exact read-only accessor"
+                ));
+            }
         }
     }
     if relative.ends_with("/import.rs") {
@@ -355,6 +429,64 @@ fn source_violations(relative: &str, source: &str) -> Result<Vec<String>, syn::E
         }
     }
     Ok(visitor.violations.into_iter().collect())
+}
+
+fn summary_getter_is_exact(
+    syntax: &syn::File,
+    name: &str,
+    output: &str,
+    borrowed: bool,
+    is_const: bool,
+) -> bool {
+    let method = syntax.items.iter().find_map(|item| match item {
+        Item::Impl(item)
+            if matches!(&*item.self_ty, syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("ImportedAssessmentSummary")) =>
+        {
+            item.items.iter().find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == name => Some(method),
+                _ => None,
+            })
+        },
+        _ => None,
+    });
+    let Some(method) = method else {
+        return false;
+    };
+    let receiver_is_shared = matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.mutability.is_none())
+        && method.sig.inputs.len() == 1;
+    let output_is_exact = match (&method.sig.output, borrowed) {
+        (syn::ReturnType::Type(_, ty), true) => {
+            matches!(&**ty, syn::Type::Reference(reference) if reference.mutability.is_none() && matches!(&*reference.elem, syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident(output)))
+        },
+        (syn::ReturnType::Type(_, ty), false) => {
+            matches!(&**ty, syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident(output))
+        },
+        _ => false,
+    };
+    let body_is_exact = matches!(method.block.stmts.as_slice(), [syn::Stmt::Expr(expression, None)] if getter_expression_is_exact(expression, name, borrowed));
+    matches!(method.vis, Visibility::Public(_))
+        && receiver_is_shared
+        && output_is_exact
+        && body_is_exact
+        && method.sig.constness.is_some() == is_const
+        && method.sig.asyncness.is_none()
+        && method.sig.unsafety.is_none()
+        && method.sig.abi.is_none()
+        && method.sig.generics.params.is_empty()
+}
+
+fn getter_expression_is_exact(expression: &syn::Expr, field: &str, borrowed: bool) -> bool {
+    let expression = if borrowed {
+        match expression {
+            syn::Expr::Reference(reference) if reference.mutability.is_none() => &*reference.expr,
+            _ => return false,
+        }
+    } else {
+        expression
+    };
+    matches!(expression, syn::Expr::Field(field_expression)
+        if matches!(&*field_expression.base, syn::Expr::Path(path) if path.qself.is_none() && path.path.is_ident("self"))
+            && matches!(&field_expression.member, syn::Member::Named(name) if name == field))
 }
 
 fn public_item_name(item: &Item) -> Option<String> {
@@ -776,6 +908,7 @@ mod tests {
             );
         }
         for owner in [
+            "ImportedAssessmentSummary",
             "ComparisonDocument",
             "SourceMetadata",
             "ComparisonItem",
@@ -799,6 +932,32 @@ mod tests {
         assert!(!source_violations("reporting/comparison.rs", &mutation)
             .unwrap()
             .is_empty());
+        for (from, to) in [
+            ("    schema: String,", "    pub schema: String,"),
+            (
+                "#[derive(Debug, Clone, PartialEq, Eq)]\n#[non_exhaustive]\npub struct ImportedAssessmentSummary",
+                "#[derive(Debug, Clone, PartialEq, Eq, Serialize)]\n#[non_exhaustive]\npub struct ImportedAssessmentSummary",
+            ),
+            (
+                "bytes: &[u8],",
+                "bytes: &mut Vec<u8>,",
+            ),
+            (
+                "Result<ImportedAssessmentSummary, ComparisonError>",
+                "Result<AssessmentRunReport, ComparisonError>",
+            ),
+            (
+                "pub fn schema(&self) -> &str {\n        &self.schema\n    }",
+                "pub fn schema(&self) -> String {\n        self.schema.clone()\n    }",
+            ),
+        ] {
+            assert!(
+                !source_violations("reporting/comparison.rs", &mutate(ROOT, from, to))
+                    .unwrap()
+                    .is_empty(),
+                "accepted display-summary mutation {to}"
+            );
+        }
         for (from, to) in [
             ("before: &[u8]", "before: &str"),
             ("after: &[u8]", "after: &mut Vec<u8>"),
@@ -825,7 +984,7 @@ mod tests {
             ),
             ("fn main()", "#[tokio::main] async fn main()"),
             (
-                "return report_compare::run(command).map_err(Into::into);",
+                "return report_compare::run(command);",
                 "return run_existing_command(Some(Commands::Report { command }));",
             ),
         ] {

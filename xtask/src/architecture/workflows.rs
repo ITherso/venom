@@ -72,6 +72,8 @@ const TESTS_WORKFLOW: &str = ".github/workflows/tests.yml";
 const FIRST_USE_TEMP_PREFIX: &str = "${{ runner.temp }}/termivar-first-use-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}";
 const REPORT_BUNDLE_SMOKE_GATE: &str = r#"      - name: Exercise single-run report bundle CLI
         run: cargo test --locked -p termivar-cli --test report_bundle_cli"#;
+const REPORT_VERIFICATION_SMOKE_GATE: &str = r#"      - name: Exercise offline report bundle verification CLI
+        run: cargo test --locked -p termivar-cli --test report_verify_cli"#;
 const SECURITY_WORKFLOW: &str = ".github/workflows/security.yml";
 const AUDIT_RUNNER: &str = "scripts/ci/run-cargo-audit.sh";
 const DEVELOPMENT_LINE_CHECKOUT: &str = r#"      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -328,6 +330,7 @@ pub(super) fn check(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>
     violations.extend(development_line_workflow_policy_violations(&files));
     violations.extend(first_use_workflow_policy_violations(&files));
     violations.extend(report_bundle_workflow_policy_violations(&files));
+    violations.extend(report_verification_workflow_policy_violations(&files));
     let baseline_accepted = workspace_root.join(COVERAGE_BASELINE_POINTER).is_file();
     violations.extend(coverage_workflow_policy_violations(
         &files,
@@ -366,6 +369,39 @@ fn report_bundle_workflow_policy_violations(files: &[(String, String)]) -> Vec<S
     } else {
         vec![format!(
             "{TESTS_WORKFLOW}: three-platform runtime smoke must run the exact unsuppressed report-bundle CLI integration test"
+        )]
+    }
+}
+
+fn report_verification_workflow_policy_violations(files: &[(String, String)]) -> Vec<String> {
+    let Some((_, contents)) = files.iter().find(|(path, _)| path == TESTS_WORKFLOW) else {
+        return vec![format!(
+            "{TESTS_WORKFLOW}: reviewed report-verification runtime-smoke workflow is missing"
+        )];
+    };
+    let normalized = contents.replace("\r\n", "\n");
+    let jobs = named_job_blocks(&normalized, "platform-runtime-smoke");
+    let [job] = jobs.as_slice() else {
+        return vec![format!(
+            "{TESTS_WORKFLOW}: expected exactly one reviewed platform runtime-smoke job"
+        )];
+    };
+    let starts = job
+        .match_indices("      - name: Exercise offline report bundle verification CLI")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let valid = starts.len() == 1 && {
+        let tail = &job[starts[0]..];
+        let end = tail[1..]
+            .find("\n      - ")
+            .map_or(tail.len(), |offset| offset + 1);
+        tail[..end].trim_end() == REPORT_VERIFICATION_SMOKE_GATE
+    };
+    if valid {
+        Vec::new()
+    } else {
+        vec![format!(
+            "{TESTS_WORKFLOW}: three-platform runtime smoke must run the exact unsuppressed report-verification CLI integration test"
         )]
     }
 }
@@ -1594,6 +1630,47 @@ mod tests {
                 report_bundle_workflow_policy_violations(&[(TESTS_WORKFLOW.to_owned(), mutation)]);
             assert_eq!(violations.len(), 1, "{violations:?}");
             assert!(violations[0].contains("report-bundle"), "{violations:?}");
+        }
+    }
+
+    #[test]
+    fn repository_report_verification_smoke_is_exact_on_all_platforms() {
+        let contents = include_str!("../../../.github/workflows/tests.yml");
+        for fixture in [contents.to_owned(), contents.replace('\n', "\r\n")] {
+            let violations = report_verification_workflow_policy_violations(&[(
+                TESTS_WORKFLOW.to_owned(),
+                fixture,
+            )]);
+            assert!(violations.is_empty(), "{violations:?}");
+        }
+    }
+
+    #[test]
+    fn report_verification_smoke_rejects_omission_substitution_and_suppression() {
+        let valid = include_str!("../../../.github/workflows/tests.yml").replace("\r\n", "\n");
+        for mutation in [
+            valid.replacen(REPORT_VERIFICATION_SMOKE_GATE, "", 1),
+            valid.replacen(
+                "cargo test --locked -p termivar-cli --test report_verify_cli",
+                "cargo test --locked -p termivar-cli --test report_compare_cli",
+                1,
+            ),
+            valid.replacen(
+                REPORT_VERIFICATION_SMOKE_GATE,
+                &format!("{REPORT_VERIFICATION_SMOKE_GATE}\n        continue-on-error: true"),
+                1,
+            ),
+        ] {
+            assert_ne!(mutation, valid, "mutation must alter the workflow fixture");
+            let violations = report_verification_workflow_policy_violations(&[(
+                TESTS_WORKFLOW.to_owned(),
+                mutation,
+            )]);
+            assert_eq!(violations.len(), 1, "{violations:?}");
+            assert!(
+                violations[0].contains("report-verification"),
+                "{violations:?}"
+            );
         }
     }
 

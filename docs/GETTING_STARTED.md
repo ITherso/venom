@@ -157,6 +157,58 @@ This option belongs to development source containing the feature; the published
 `v0.10.0-alpha.1` archives and their checked-in first-use captures do not have
 it. See the [full bundle and manifest contract](reporting.md#single-run-report-bundles).
 
+## Verify a saved bundle offline
+
+A development `0.10.0-alpha.2` binary whose `report --help` includes `verify`
+can check the fixed three-file bundle without scanning, launching, or rendering
+the HTML:
+
+```bash
+# Text result.
+termivar report verify --dir ./assessment-001
+
+# Structured result.
+termivar report verify --dir ./assessment-001 --format json
+```
+
+Exit `0` and `integrity_match` mean that the supported directory layout,
+manifest contract, exact payload lengths and SHA-256 digests, and the completed
+assessment JSON summary matched for the bytes read during this invocation.
+Exit `1` and `not_verified` identify an incomplete, unsupported, unreadable, or
+mismatched bundle with typed reason codes; checks prevented by an earlier
+failure remain `not_checked`. Invalid CLI syntax exits `2`.
+
+Run verification only on a quiescent directory beneath trusted parent
+directories. Termivar rejects a linked/reparse-point final directory and
+non-regular payloads, but it does not prove every ancestor is trustworthy or
+create an atomic filesystem snapshot. The command makes no application writes,
+repairs, removals, or permission changes. It reads only `manifest.json`,
+`assessment.html`, and `assessment.json`, hashes and validates the same captured
+payload bytes, and initializes no scanner, credentials, provider, or network
+client.
+
+An integrity match is not a signature or source-authenticity result. It does not
+establish original target scope, finding accuracy, remediation, HTML safety, or
+HTML-to-JSON semantic equivalence. A consistently edited payload and manifest
+can still be internally consistent. The HTML is never executed.
+
+Once checked, compare two deliberately selected assessment payloads with the
+existing offline command:
+
+```bash
+termivar report compare \
+  --before assessment-001/assessment.json \
+  --after assessment-002/assessment.json \
+  --same-scope
+```
+
+The verifier checks one bundle's supported internal consistency; comparison
+groups observations and separately relies on the operator's same-scope
+assertion. See the
+[full verification contract](reporting.md#offline-report-bundle-verification).
+The published `v0.10.0-alpha.1` archives contain neither `--report-dir` nor
+`report verify`.
+
 ## Open the outputs
 
 A passed run prints `first-use: passed` and retains these files in the selected
